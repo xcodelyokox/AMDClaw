@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_NAME="openclaw-amd"
+SCRIPT_VERSION="0.2.0"
+
+OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
+OPENCLAW_AMD_PROVIDER_ID="${OPENCLAW_AMD_PROVIDER_ID:-lmstudio}"
+OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-anthropic}"
+OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-}"
+OPENCLAW_AMD_LMSTUDIO_URL="${OPENCLAW_AMD_LMSTUDIO_URL:-}"
+OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
+OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-190000}"
+OPENCLAW_AMD_MAX_AGENTS="${OPENCLAW_AMD_MAX_AGENTS:-2}"
+OPENCLAW_AMD_MAX_SUBAGENTS="${OPENCLAW_AMD_MAX_SUBAGENTS:-2}"
+OPENCLAW_AMD_GATEWAY_PORT="${OPENCLAW_AMD_GATEWAY_PORT:-18789}"
+OPENCLAW_AMD_GATEWAY_BIND="${OPENCLAW_AMD_GATEWAY_BIND:-loopback}"
+OPENCLAW_AMD_SKIP_TUNING="${OPENCLAW_AMD_SKIP_TUNING:-0}"
+OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK="${OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK:-1}"
+LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY:-lmstudio}"
+LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
+
+SYSTEMD_READY=0
+DAEMON_INSTALLED=0
+RAN_ONBOARD=0
+LMSTUDIO_ROOT=""
+LMSTUDIO_MODEL_ID_RESOLVED=""
+LMSTUDIO_CONTEXT_TOKENS=""
+
+info() {
+  printf '\033[1;34m[INFO]\033[0m %s\n' "$*"
+}
+
+warn() {
+  printf '\033[1;33m[WARN]\033[0m %s\n' "$*"
+}
+
+die() {
+  printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+run_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+  else
+    have sudo || die "sudo is required to continue"
+    sudo "$@"
+  fi
+}
+
+is_wsl() {
+  grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null || \
+    grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
+}
+
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] || die "This script is for Linux/WSL only. Run it inside Ubuntu/WSL on Windows."
+}
+
+apt_install_if_missing() {
+  have apt-get || die "This script currently targets Ubuntu/Debian/WSL environments with apt-get."
+  local missing=()
+  local pkg
+  for pkg in "$@"; do
+    dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    info "Installing required packages: ${missing[*]}"
+    run_root apt-get update
+    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "${missing[@]}"
+  fi
+}
+
+normalize_lmstudio_root() {
+  local url="$1"
+  url="${url%/}"
+  url="${url%/v1}"
+  url="${url%/api/v1}"
+  printf '%s\n' "$url"
+}
+
+build_lmstudio_candidates() {
+  local items=()
+  local ns=""
+  local gw=""
+  if [[ -n "$OPENCLAW_AMD_LMSTUDIO_URL" ]]; then
+    items+=("$(normalize_lmstudio_root "$OPENCLAW_AMD_LMSTUDIO_URL")")
+  fi
+  items+=("http://127.0.0.1:${LMSTUDIO_PORT}" "http://localhost:${LMSTUDIO_PORT}")
+  if is_wsl; then
+    ns="$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+    gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}' || true)"
+    [[ -n "$ns" ]] && items+=("http://${ns}:${LMSTUDIO_PORT}")
+    [[ -n "$gw" ]] && items+=("http://${gw}:${LMSTUDIO_PORT}")
+  fi
+  python3 - "$@" <<'PY' "${items[@]}"
+import sys
+seen = set()
+for item in sys.argv[1:]:
+    item = item.strip()
+    if item and item not in seen:
+        seen.add(item)
+        print(item)
+PY
+}
+
+curl_json() {
+  local url="$1"
+  curl -fsS --max-time 5 --retry 1 \
+    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
+    -H "x-api-key: ${LMSTUDIO_API_KEY}" \
+    "$url"
+}
+
+maybe_enable_wsl_systemd() {
+  if ! is_wsl; then
+    local init_comm
+    init_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$init_comm" == "systemd" ]] && SYSTEMD_READY=1
+    return 0
+  fi
+
+  info "Detected WSL"
+  local init_comm
+  init_comm="$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$init_comm" == "systemd" ]]; then
+    SYSTEMD_READY=1
+    return 0
+  fi
+
+  info "Ensuring systemd is enabled in /etc/wsl.conf"
+  if run_root test -f /etc/wsl.conf; then
+    local backup_path="/etc/wsl.conf.bak.${SCRIPT_NAME}.$(date +%s)"
+    run_root cp /etc/wsl.conf "$backup_path"
+    info "Backed up /etc/wsl.conf to $backup_path"
+  fi
+
+  run_root python3 - <<'PY'
+from pathlib import Path
+import configparser
+path = Path('/etc/wsl.conf')
+cp = configparser.ConfigParser(strict=False)
+if path.exists():
+    cp.read(path)
+if not cp.has_section('boot'):
+    cp.add_section('boot')
+cp.set('boot', 'systemd', 'true')
+with path.open('w', encoding='utf-8') as f:
+    cp.write(f)
+PY
+
+  warn "systemd was not active in this WSL session."
+  warn "Run 'wsl --shutdown' from PowerShell, reopen Ubuntu/WSL, and rerun the same curl | bash command."
+  exit 10
+}
+
+install_or_update_openclaw() {
+  info "Installing or updating OpenClaw"
+  curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard
+}
+
+refresh_homebrew_path() {
+  local brew_bin=""
+
+  if [[ -x "$HOME/.linuxbrew/bin/brew" ]]; then
+    brew_bin="$HOME/.linuxbrew/bin/brew"
+  elif [[ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]]; then
+    brew_bin="/home/linuxbrew/.linuxbrew/bin/brew"
+  elif have brew; then
+    brew_bin="$(command -v brew)"
+  fi
+
+  if [[ -n "$brew_bin" ]]; then
+    eval "$($brew_bin shellenv)"
+  fi
+
+  hash -r 2>/dev/null || true
+}
+
+persist_homebrew_shellenv() {
+  have brew || return 0
+
+  local brew_prefix
+  local shellenv_line
+  brew_prefix="$(brew --prefix)"
+  shellenv_line="eval \"\$(${brew_prefix}/bin/brew shellenv)\""
+
+  local bashrc="$HOME/.bashrc"
+  touch "$bashrc"
+  if ! grep -Fqx "$shellenv_line" "$bashrc"; then
+    printf '\n%s\n' "$shellenv_line" >> "$bashrc"
+    info "Added Homebrew shellenv to ${bashrc}"
+  fi
+
+  local zshrc="$HOME/.zshrc"
+  if [[ -f "$zshrc" ]] && ! grep -Fqx "$shellenv_line" "$zshrc"; then
+    printf '\n%s\n' "$shellenv_line" >> "$zshrc"
+    info "Added Homebrew shellenv to ${zshrc}"
+  fi
+}
+
+install_homebrew_if_missing() {
+  refresh_homebrew_path
+  if have brew; then
+    info "Homebrew already installed"
+    persist_homebrew_shellenv
+    return 0
+  fi
+
+  info "Installing Homebrew for Linux/WSL"
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  refresh_homebrew_path
+  have brew || die "Homebrew installation finished, but the 'brew' command is not on PATH yet. Open a new shell and rerun the script."
+  persist_homebrew_shellenv
+}
+
+refresh_openclaw_path() {
+  refresh_homebrew_path
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  if have npm; then
+    local npm_prefix
+    npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+    if [[ -n "$npm_prefix" ]]; then
+      export PATH="$npm_prefix/bin:$npm_prefix:$PATH"
+    fi
+  fi
+  hash -r 2>/dev/null || true
+}
+
+require_openclaw() {
+  refresh_openclaw_path
+  have openclaw || die "OpenClaw installed, but the 'openclaw' command is not on PATH yet. Open a new shell and rerun the script."
+}
+
+backup_openclaw_config() {
+  local cfg="$1"
+  if [[ -f "$cfg" ]]; then
+    local backup="${cfg}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$cfg" "$backup"
+    info "Backed up existing config to $backup"
+  fi
+}
+
+resolve_lmstudio_endpoint() {
+  local candidate
+  local payload
+  while IFS= read -r candidate; do
+    [[ -z "$candidate" ]] && continue
+
+    if payload="$(curl_json "${candidate}/api/v1/models" 2>/dev/null)"; then
+      local resolved
+      resolved="$(python3 - <<'PY' "$payload" "$OPENCLAW_AMD_MODEL_ID"
+import json
+import sys
+payload = json.loads(sys.argv[1])
+forced = sys.argv[2].strip()
+models = payload.get('models') or []
+
+selected = None
+selected_ctx = None
+best_score = -10**9
+for model in models:
+    mtype = str(model.get('type', '')).lower()
+    if mtype != 'llm':
+        continue
+    key = model.get('key') or model.get('id') or model.get('model') or model.get('name')
+    if not key:
+        continue
+    if forced and key != forced:
+        continue
+    loaded_instances = model.get('loaded_instances') or []
+    loaded = bool(loaded_instances)
+    ctx = None
+    if loaded_instances:
+        inst = loaded_instances[0] or {}
+        cfg = inst.get('config') or {}
+        ctx = cfg.get('context_length') or cfg.get('max_context_length')
+    ctx = ctx or model.get('max_context_length') or model.get('context_length')
+    score = 0
+    if loaded:
+        score += 100
+    if isinstance(ctx, int):
+        score += min(ctx, 10_000_000)
+    if score > best_score:
+        best_score = score
+        selected = key
+        selected_ctx = ctx
+
+if not selected and forced:
+    print(f"{forced}\t")
+elif selected:
+    print(f"{selected}\t{selected_ctx or ''}")
+PY
+)"
+      if [[ -n "$resolved" ]]; then
+        LMSTUDIO_ROOT="$candidate"
+        LMSTUDIO_MODEL_ID_RESOLVED="${resolved%%$'\t'*}"
+        LMSTUDIO_CONTEXT_TOKENS="${resolved#*$'\t'}"
+        [[ "$LMSTUDIO_CONTEXT_TOKENS" == "$resolved" ]] && LMSTUDIO_CONTEXT_TOKENS=""
+        return 0
+      fi
+    fi
+
+    if payload="$(curl_json "${candidate}/v1/models" 2>/dev/null)"; then
+      local resolved
+      resolved="$(python3 - <<'PY' "$payload" "$OPENCLAW_AMD_MODEL_ID"
+import json
+import sys
+payload = json.loads(sys.argv[1])
+forced = sys.argv[2].strip()
+items = payload.get('data') or []
+selected = None
+for item in items:
+    mid = item.get('id') or item.get('model') or item.get('name')
+    if not mid:
+        continue
+    if forced and mid != forced:
+        continue
+    if 'embedding' in str(mid).lower():
+        continue
+    selected = mid
+    break
+if not selected and forced:
+    print(forced)
+elif selected:
+    print(selected)
+PY
+)"
+      if [[ -n "$resolved" ]]; then
+        LMSTUDIO_ROOT="$candidate"
+        LMSTUDIO_MODEL_ID_RESOLVED="$resolved"
+        LMSTUDIO_CONTEXT_TOKENS=""
+        return 0
+      fi
+    fi
+  done < <(build_lmstudio_candidates)
+
+  return 1
+}
+
+provider_base_url_for_compat() {
+  local root="$1"
+  local compat="$2"
+  if [[ "$compat" == "openai" ]]; then
+    printf '%s/v1\n' "${root%/}"
+  else
+    printf '%s\n' "${root%/}"
+  fi
+}
+
+run_noninteractive_onboard() {
+  local compat="$1"
+  local base_url
+  base_url="$(provider_base_url_for_compat "$LMSTUDIO_ROOT" "$compat")"
+
+  local cmd=(
+    openclaw onboard
+    --non-interactive
+    --mode local
+    --auth-choice custom-api-key
+    --custom-base-url "$base_url"
+    --custom-model-id "$LMSTUDIO_MODEL_ID_RESOLVED"
+    --custom-provider-id "$OPENCLAW_AMD_PROVIDER_ID"
+    --custom-compatibility "$compat"
+    --custom-api-key "$LMSTUDIO_API_KEY"
+    --secret-input-mode plaintext
+    --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
+    --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
+    --skip-skills
+  )
+
+  if (( SYSTEMD_READY )); then
+    cmd+=(--install-daemon --daemon-runtime node)
+  fi
+
+  info "Configuring OpenClaw against LM Studio (${compat}-compatible API)"
+  if "${cmd[@]}"; then
+    DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
+    RAN_ONBOARD=1
+    return 0
+  fi
+
+  if (( SYSTEMD_READY )); then
+    warn "Onboarding with daemon install failed. Retrying without daemon installation."
+    local retry_cmd=(
+      openclaw onboard
+      --non-interactive
+      --mode local
+      --auth-choice custom-api-key
+      --custom-base-url "$base_url"
+      --custom-model-id "$LMSTUDIO_MODEL_ID_RESOLVED"
+      --custom-provider-id "$OPENCLAW_AMD_PROVIDER_ID"
+      --custom-compatibility "$compat"
+      --custom-api-key "$LMSTUDIO_API_KEY"
+      --secret-input-mode plaintext
+      --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
+      --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
+      --skip-skills
+      --skip-health
+    )
+    if "${retry_cmd[@]}"; then
+      DAEMON_INSTALLED=0
+      RAN_ONBOARD=1
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+auto_tune_config() {
+  [[ "$OPENCLAW_AMD_SKIP_TUNING" == "1" ]] && return 0
+  [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 0
+
+  local context_tokens="$OPENCLAW_AMD_CONTEXT_TOKENS"
+
+  python3 - <<'PY' \
+    "$OPENCLAW_CONFIG_FILE" \
+    "$OPENCLAW_AMD_PROVIDER_ID" \
+    "$LMSTUDIO_MODEL_ID_RESOLVED" \
+    "$context_tokens" \
+    "$OPENCLAW_AMD_MODEL_MAX_TOKENS" \
+    "$OPENCLAW_AMD_MAX_AGENTS" \
+    "$OPENCLAW_AMD_MAX_SUBAGENTS"
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+provider_id = sys.argv[2]
+model_id = sys.argv[3]
+context_tokens = int(sys.argv[4])
+model_max_tokens = int(sys.argv[5])
+max_agents = int(sys.argv[6])
+max_subagents = int(sys.argv[7])
+
+cfg = json.loads(config_path.read_text(encoding='utf-8'))
+agents = cfg.setdefault('agents', {})
+defaults = agents.setdefault('defaults', {})
+
+model_ref = f"{provider_id}/{model_id}"
+
+current_model = defaults.get('model')
+if isinstance(current_model, str):
+    defaults['model'] = {'primary': model_ref}
+elif isinstance(current_model, dict):
+    current_model['primary'] = model_ref
+else:
+    defaults['model'] = {'primary': model_ref}
+
+default_models = defaults.setdefault('models', {})
+default_models.setdefault(model_ref, {})
+default_models[model_ref].setdefault('alias', 'amd-local')
+
+defaults['contextTokens'] = context_tokens
+defaults['maxConcurrent'] = max_agents
+subagents = defaults.setdefault('subagents', {})
+subagents['maxConcurrent'] = max_subagents
+
+models_root = cfg.setdefault('models', {})
+providers = models_root.setdefault('providers', {})
+provider = providers.setdefault(provider_id, {})
+provider_models = provider.setdefault('models', [])
+
+entry = None
+for item in provider_models:
+    if isinstance(item, dict) and item.get('id') == model_id:
+        entry = item
+        break
+if entry is None:
+    entry = {'id': model_id, 'name': model_id}
+    provider_models.append(entry)
+
+entry['contextWindow'] = context_tokens
+entry['maxTokens'] = model_max_tokens
+
+config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
+PY
+
+  info "Applied AMD-friendly OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
+}
+
+print_next_steps() {
+  local context_tokens="$OPENCLAW_AMD_CONTEXT_TOKENS"
+
+  printf '\n'
+  info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
+  printf '  LM Studio endpoint : %s\n' "$LMSTUDIO_ROOT"
+  printf '  Model             : %s\n' "$LMSTUDIO_MODEL_ID_RESOLVED"
+  printf '  Context tokens    : %s\n' "$context_tokens"
+  printf '  Agent concurrency : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
+  printf '  Subagent conc.    : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
+  printf '  Max tokens        : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
+  printf '  Default profile   : %s\n' "RadeonClaw-compatible"
+  printf '\n'
+  if (( DAEMON_INSTALLED )); then
+    printf 'Next commands:\n'
+    printf '  openclaw status\n'
+    printf '  openclaw dashboard\n'
+  else
+    printf 'Next commands:\n'
+    printf '  openclaw gateway run\n'
+    printf '  openclaw dashboard\n'
+  fi
+}
+
+main() {
+  require_linux
+  apt_install_if_missing ca-certificates curl git python3 build-essential file procps
+  maybe_enable_wsl_systemd
+  install_homebrew_if_missing
+  install_or_update_openclaw
+  require_openclaw
+
+  if ! resolve_lmstudio_endpoint; then
+    warn "OpenClaw is installed, but LM Studio was not reachable from this shell."
+    warn "Start LM Studio on Windows, load a model, enable the local server, and turn on 'Serve on Local Network'."
+    warn "Then rerun the same curl | bash command."
+    exit 20
+  fi
+
+  [[ -n "$LMSTUDIO_MODEL_ID_RESOLVED" ]] || die "LM Studio is reachable, but no LLM model could be selected. Load a model in LM Studio and rerun the script."
+
+  backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
+
+  local compat_attempts=("$OPENCLAW_AMD_COMPAT")
+  if [[ "$OPENCLAW_AMD_COMPAT" == "anthropic" && "$OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK" == "1" ]]; then
+    compat_attempts+=("openai")
+  fi
+
+  local compat
+  local configured=0
+  for compat in "${compat_attempts[@]}"; do
+    if run_noninteractive_onboard "$compat"; then
+      configured=1
+      break
+    fi
+    warn "OpenClaw onboarding failed for compatibility mode '${compat}'."
+  done
+
+  (( configured == 1 )) || die "OpenClaw was installed, but non-interactive onboarding against LM Studio failed. Try setting OPENCLAW_AMD_LMSTUDIO_URL and OPENCLAW_AMD_MODEL_ID explicitly and rerun."
+
+  auto_tune_config
+  print_next_steps
+}
+
+main "$@"
