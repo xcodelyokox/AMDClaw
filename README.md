@@ -12,7 +12,7 @@ Run this inside your Ubuntu/WSL shell after you have:
 4. enabled LM Studio's local server (and **Serve on Local Network**).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<OWNER>/<REPO>/main/openclaw-amd.sh | bash
+curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 ```
 
 From PowerShell, you can launch the same thing through WSL:
