@@ -26,6 +26,7 @@ RAN_ONBOARD=0
 LMSTUDIO_ROOT=""
 LMSTUDIO_MODEL_ID_RESOLVED=""
 LMSTUDIO_CONTEXT_TOKENS=""
+BREW_BIN=""
 
 info() {
   printf '\033[1;34m[INFO]\033[0m %s\n' "$*"
@@ -60,6 +61,71 @@ is_wsl() {
 
 require_linux() {
   [[ "$(uname -s)" == "Linux" ]] || die "This script is for Linux/WSL only. Run it inside Ubuntu/WSL on Windows."
+}
+
+append_line_if_missing() {
+  local file="$1"
+  local line="$2"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  grep -qxF "$line" "$file" 2>/dev/null || printf '%s\n' "$line" >> "$file"
+}
+
+
+prepare_npm_global_prefix() {
+  mkdir -p "$HOME/.config/systemd/user" "$HOME/.npm-global"
+  append_line_if_missing "$HOME/.profile" 'export PATH="$HOME/.npm-global/bin:$PATH"'
+  append_line_if_missing "$HOME/.bashrc" 'export PATH="$HOME/.npm-global/bin:$PATH"'
+  if [[ -f "$HOME/.zshrc" ]]; then
+    append_line_if_missing "$HOME/.zshrc" 'export PATH="$HOME/.npm-global/bin:$PATH"'
+  fi
+  export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+  export PATH="$HOME/.npm-global/bin:$PATH"
+  if have npm; then
+    npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+  fi
+  hash -r 2>/dev/null || true
+}
+
+persist_brew_shellenv() {
+  [[ -n "$BREW_BIN" ]] || return 0
+  local bash_line='eval "$('"$BREW_BIN"' shellenv bash)"'
+  append_line_if_missing "$HOME/.profile" "$bash_line"
+  append_line_if_missing "$HOME/.bashrc" "$bash_line"
+  if [[ -f "$HOME/.zshrc" ]]; then
+    local zsh_line='eval "$('"$BREW_BIN"' shellenv)"'
+    append_line_if_missing "$HOME/.zshrc" "$zsh_line"
+  fi
+  eval "$("$BREW_BIN" shellenv bash)"
+  hash -r 2>/dev/null || true
+}
+
+install_homebrew_if_missing() {
+  if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+    BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
+    persist_brew_shellenv
+    info "Homebrew already installed"
+    return 0
+  fi
+
+  if have brew; then
+    BREW_BIN="$(command -v brew)"
+    persist_brew_shellenv
+    info "Homebrew already installed"
+    return 0
+  fi
+
+  info "Installing Homebrew"
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+  if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+    BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
+  elif have brew; then
+    BREW_BIN="$(command -v brew)"
+  fi
+
+  [[ -n "$BREW_BIN" ]] || die "Homebrew install finished, but 'brew' was not found."
+  persist_brew_shellenv
 }
 
 apt_install_if_missing() {
@@ -161,66 +227,14 @@ PY
 
 install_or_update_openclaw() {
   info "Installing or updating OpenClaw"
+  prepare_npm_global_prefix
   curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard
-}
-
-refresh_homebrew_path() {
-  local brew_bin=""
-
-  if [[ -x "$HOME/.linuxbrew/bin/brew" ]]; then
-    brew_bin="$HOME/.linuxbrew/bin/brew"
-  elif [[ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]]; then
-    brew_bin="/home/linuxbrew/.linuxbrew/bin/brew"
-  elif have brew; then
-    brew_bin="$(command -v brew)"
+  if have npm; then
+    npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
   fi
-
-  if [[ -n "$brew_bin" ]]; then
-    eval "$($brew_bin shellenv)"
-  fi
-
-  hash -r 2>/dev/null || true
-}
-
-persist_homebrew_shellenv() {
-  have brew || return 0
-
-  local brew_prefix
-  local shellenv_line
-  brew_prefix="$(brew --prefix)"
-  shellenv_line="eval \"\$(${brew_prefix}/bin/brew shellenv)\""
-
-  local bashrc="$HOME/.bashrc"
-  touch "$bashrc"
-  if ! grep -Fqx "$shellenv_line" "$bashrc"; then
-    printf '\n%s\n' "$shellenv_line" >> "$bashrc"
-    info "Added Homebrew shellenv to ${bashrc}"
-  fi
-
-  local zshrc="$HOME/.zshrc"
-  if [[ -f "$zshrc" ]] && ! grep -Fqx "$shellenv_line" "$zshrc"; then
-    printf '\n%s\n' "$shellenv_line" >> "$zshrc"
-    info "Added Homebrew shellenv to ${zshrc}"
-  fi
-}
-
-install_homebrew_if_missing() {
-  refresh_homebrew_path
-  if have brew; then
-    info "Homebrew already installed"
-    persist_homebrew_shellenv
-    return 0
-  fi
-
-  info "Installing Homebrew for Linux/WSL"
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  refresh_homebrew_path
-  have brew || die "Homebrew installation finished, but the 'brew' command is not on PATH yet. Open a new shell and rerun the script."
-  persist_homebrew_shellenv
 }
 
 refresh_openclaw_path() {
-  refresh_homebrew_path
   export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
   if have npm; then
     local npm_prefix
@@ -372,6 +386,7 @@ run_noninteractive_onboard() {
     --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
     --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
     --skip-skills
+    --accept-risk
   )
 
   if (( SYSTEMD_READY )); then
@@ -402,6 +417,7 @@ run_noninteractive_onboard() {
       --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
       --skip-skills
       --skip-health
+      --accept-risk
     )
     if "${retry_cmd[@]}"; then
       DAEMON_INSTALLED=0
@@ -482,21 +498,18 @@ entry['maxTokens'] = model_max_tokens
 config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
 PY
 
-  info "Applied AMD-friendly OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
+  info "Applied RadeonClaw-default OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
 }
 
 print_next_steps() {
-  local context_tokens="$OPENCLAW_AMD_CONTEXT_TOKENS"
-
   printf '\n'
   info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
   printf '  LM Studio endpoint : %s\n' "$LMSTUDIO_ROOT"
   printf '  Model             : %s\n' "$LMSTUDIO_MODEL_ID_RESOLVED"
-  printf '  Context tokens    : %s\n' "$context_tokens"
+  printf '  Context tokens    : %s\n' "$OPENCLAW_AMD_CONTEXT_TOKENS"
+  printf '  Max tokens        : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
   printf '  Agent concurrency : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
   printf '  Subagent conc.    : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
-  printf '  Max tokens        : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
-  printf '  Default profile   : %s\n' "RadeonClaw-compatible"
   printf '\n'
   if (( DAEMON_INSTALLED )); then
     printf 'Next commands:\n'
@@ -511,10 +524,12 @@ print_next_steps() {
 
 main() {
   require_linux
-  apt_install_if_missing ca-certificates curl git python3 build-essential file procps
+  apt_install_if_missing ca-certificates curl git python3 build-essential
+  prepare_npm_global_prefix
   maybe_enable_wsl_systemd
   install_homebrew_if_missing
   install_or_update_openclaw
+  prepare_npm_global_prefix
   require_openclaw
 
   if ! resolve_lmstudio_endpoint; then
