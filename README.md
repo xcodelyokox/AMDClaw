@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/<OWNER>/<REPO>/main/openclaw-amd.sh
 From PowerShell, you can launch the same thing through WSL:
 
 ```powershell
-wsl -d Ubuntu-24.04 bash -lc 'curl -fsSL https://raw.githubusercontent.com/<OWNER>/<REPO>/main/openclaw-amd.sh | bash'
+wsl -d Ubuntu-24.04 bash -lc 'curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash'
 ```
 
 ## What the script automates
