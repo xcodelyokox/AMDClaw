@@ -7,7 +7,7 @@ SCRIPT_VERSION="0.3.0"
 OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
 OPENCLAW_AMD_PROVIDER_ID="${OPENCLAW_AMD_PROVIDER_ID:-lmstudio}"
 OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-anthropic}"
-OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-qwen/qwen3-coder-next}"
+OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-zai.org/glm-4.7-flash}"
 OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
 OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-190000}"
 OPENCLAW_AMD_MAX_AGENTS="${OPENCLAW_AMD_MAX_AGENTS:-2}"
@@ -170,26 +170,30 @@ install_rocm_wsl() {
   # noble = 24.04, jammy = 22.04 — add more as AMD publishes them
   local repo_codename="$codename"
 
-  # Build the .deb URL unless the caller overrode it.
-  # AMD publishes a /latest/ symlink on repo.radeon.com that always points to the
-  # newest amdgpu-install release, so we use that by default to stay current.
-  # If the caller sets ROCM_VERSION to a specific tag (e.g. "7.2") the script will
-  # try to resolve the matching deb filename from that versioned path instead.
-  local deb_url="$ROCM_AMDGPU_INSTALL_DEB"
-  if [[ -z "$deb_url" ]]; then
-    if [[ "$ROCM_VERSION" == "latest" ]]; then
-      # Discover the actual deb name from the /latest/ directory listing
-      local index_url="https://repo.radeon.com/amdgpu-install/latest/ubuntu/${repo_codename}/"
-      local deb_name
-      deb_name="$(curl -fsSL --max-time 10 "$index_url" \
-        | grep -oP 'amdgpu-install_[0-9][^"]+\.deb' \
-        | sort -V | tail -1)"
-      [[ -n "$deb_name" ]] || die "Could not discover amdgpu-install deb from ${index_url}"
-      deb_url="${index_url}${deb_name}"
-    else
-      # Versioned path: encode X.Y -> X0Y00, e.g. 7.2 -> 70200
-      local deb_name
-      deb_name="$(python3 - "$ROCM_VERSION" <<'PY'
+  # If amdgpu-install is already present (e.g. the .deb was installed in a prior
+  # partial run), skip the download and apt-install step and go straight to the
+  # usecase install so we don't re-download the package unnecessarily.
+  if ! have amdgpu-install; then
+    # Build the .deb URL unless the caller overrode it.
+    # AMD publishes a /latest/ symlink on repo.radeon.com that always points to the
+    # newest amdgpu-install release, so we use that by default to stay current.
+    # If the caller sets ROCM_VERSION to a specific tag (e.g. "7.2") the script will
+    # try to resolve the matching deb filename from that versioned path instead.
+    local deb_url="$ROCM_AMDGPU_INSTALL_DEB"
+    if [[ -z "$deb_url" ]]; then
+      if [[ "$ROCM_VERSION" == "latest" ]]; then
+        # Discover the actual deb name from the /latest/ directory listing
+        local index_url="https://repo.radeon.com/amdgpu-install/latest/ubuntu/${repo_codename}/"
+        local deb_name
+        deb_name="$(curl -fsSL --max-time 10 "$index_url" \
+          | grep -oP 'amdgpu-install_[0-9][^"]+\.deb' \
+          | sort -V | tail -1)"
+        [[ -n "$deb_name" ]] || die "Could not discover amdgpu-install deb from ${index_url}"
+        deb_url="${index_url}${deb_name}"
+      else
+        # Versioned path: encode X.Y -> X0Y00, e.g. 7.2 -> 70200
+        local deb_name
+        deb_name="$(python3 - "$ROCM_VERSION" <<'PY'
 import sys
 ver = sys.argv[1].strip()
 parts = ver.split(".")
@@ -200,20 +204,23 @@ encoded = f"{major}{minor:02d}{patch:02d}"
 print(f"amdgpu-install_{ver}.{encoded}-1_all.deb")
 PY
 )"
-      deb_url="https://repo.radeon.com/amdgpu-install/${ROCM_VERSION}/ubuntu/${repo_codename}/${deb_name}"
+        deb_url="https://repo.radeon.com/amdgpu-install/${ROCM_VERSION}/ubuntu/${repo_codename}/${deb_name}"
+      fi
     fi
+
+    local tmp_deb
+    tmp_deb="$(mktemp /tmp/amdgpu-install.XXXXXX.deb)"
+    trap 'rm -f "$tmp_deb"' RETURN
+
+    info "Downloading amdgpu-install from: ${deb_url}"
+    curl -fSL --retry 3 -o "$tmp_deb" "$deb_url" \
+      || die "Failed to download amdgpu-install package. Check ROCM_VERSION (${ROCM_VERSION}) and your Adrenalin driver version."
+
+    apt_install_if_missing wget gnupg2 initramfs-tools
+    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "$tmp_deb"
+  else
+    info "amdgpu-install already present — skipping package download"
   fi
-
-  local tmp_deb
-  tmp_deb="$(mktemp /tmp/amdgpu-install.XXXXXX.deb)"
-  trap 'rm -f "$tmp_deb"' RETURN
-
-  info "Downloading amdgpu-install from: ${deb_url}"
-  curl -fSL --retry 3 -o "$tmp_deb" "$deb_url" \
-    || die "Failed to download amdgpu-install package. Check ROCM_VERSION (${ROCM_VERSION}) and your Adrenalin driver version."
-
-  apt_install_if_missing wget gnupg2 initramfs-tools
-  DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "$tmp_deb"
 
   info "Running amdgpu-install --usecase=wsl,rocm --no-dkms"
   DEBIAN_FRONTEND=noninteractive run_root amdgpu-install --usecase=wsl,rocm --no-dkms -y \
@@ -265,29 +272,63 @@ persist_lms_path() {
 
 # ---------------------------------------------------------------------------
 # Start the llmster daemon, load a model, and start the API server.
-# If a model is already loaded and the server is already listening, this is a
-# no-op so the script is safe to re-run.
+# Each sub-step checks whether it is already complete before acting, so this
+# function is safe to call on a partial or fully-completed previous run.
 # ---------------------------------------------------------------------------
+
+# Returns 0 if the model is already loaded in llmster memory.
+lms_model_is_loaded() {
+  "$LMS_BIN" ps 2>/dev/null | grep -qF "$OPENCLAW_AMD_MODEL_ID"
+}
+
+# Returns 0 if the model file is already present on disk (fully downloaded).
+lms_model_is_on_disk() {
+  "$LMS_BIN" ls 2>/dev/null | grep -qF "$OPENCLAW_AMD_MODEL_ID"
+}
+
+# Returns 0 if the API server is already responding on the expected port.
+lms_server_is_up() {
+  curl -fsS --max-time 2 \
+    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
+    "http://127.0.0.1:${LMSTUDIO_PORT}/v1/models" >/dev/null 2>&1
+}
+
 start_llmster_server() {
   info "Starting llmster daemon"
   "$LMS_BIN" daemon up 2>/dev/null || true
 
-  # If the user specified a model ID, load it explicitly
   if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
-    info "Loading model: ${OPENCLAW_AMD_MODEL_ID}"
-    "$LMS_BIN" load "$OPENCLAW_AMD_MODEL_ID" --yes \
-      || die "Failed to load model '${OPENCLAW_AMD_MODEL_ID}'. Make sure you have downloaded it first with: lms get <model-id>"
+    if lms_model_is_loaded; then
+      info "Model already loaded in memory: ${OPENCLAW_AMD_MODEL_ID}"
+    else
+      # Only download if not already on disk; a completed download is not re-fetched.
+      if lms_model_is_on_disk; then
+        info "Model already on disk — skipping download: ${OPENCLAW_AMD_MODEL_ID}"
+      else
+        info "Downloading model: ${OPENCLAW_AMD_MODEL_ID}"
+        "$LMS_BIN" get "$OPENCLAW_AMD_MODEL_ID" --yes \
+          || die "Failed to download model '${OPENCLAW_AMD_MODEL_ID}'. Check the model ID and your internet connection."
+      fi
+
+      info "Loading model: ${OPENCLAW_AMD_MODEL_ID}"
+      "$LMS_BIN" load "$OPENCLAW_AMD_MODEL_ID" --yes \
+        || die "Failed to load model '${OPENCLAW_AMD_MODEL_ID}'."
+    fi
+  fi
+
+  # Skip server start (and the readiness wait) if it is already listening.
+  if lms_server_is_up; then
+    info "llmster API server already running on port ${LMSTUDIO_PORT}"
+    return 0
   fi
 
   info "Starting llmster API server on port ${LMSTUDIO_PORT}"
   "$LMS_BIN" server start --port "$LMSTUDIO_PORT" 2>/dev/null || true
 
-  # Brief wait for the server socket to be ready
+  # Wait for the server socket to be ready
   local attempts=0
   while (( attempts < 20 )); do
-    if curl -fsS --max-time 2 \
-        -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
-        "http://127.0.0.1:${LMSTUDIO_PORT}/v1/models" >/dev/null 2>&1; then
+    if lms_server_is_up; then
       return 0
     fi
     sleep 1
@@ -348,11 +389,16 @@ PY
 }
 
 install_or_update_openclaw() {
-  info "Installing or updating OpenClaw"
   prepare_npm_global_prefix
-  curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard
-  if have npm; then
-    npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+  refresh_openclaw_path
+  if have openclaw; then
+    info "OpenClaw already installed — skipping installer"
+  else
+    info "Installing OpenClaw"
+    curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard
+    if have npm; then
+      npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -380,6 +426,32 @@ backup_openclaw_config() {
     cp "$cfg" "$backup"
     info "Backed up existing config to $backup"
   fi
+}
+
+# Returns 0 if openclaw.json already contains a complete entry for the current
+# provider and model, indicating that onboarding ran successfully before.
+is_openclaw_configured() {
+  [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 1
+  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "$OPENCLAW_AMD_PROVIDER_ID" "$LMSTUDIO_MODEL_ID_RESOLVED"
+import json, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    sys.exit(1)
+provider_id = sys.argv[2]
+model_id    = sys.argv[3]
+providers = cfg.get('models', {}).get('providers', {})
+if provider_id not in providers:
+    sys.exit(1)
+models = providers[provider_id].get('models', [])
+if not any(isinstance(m, dict) and m.get('id') == model_id for m in models):
+    sys.exit(1)
+# Also require a gateway entry so a half-finished onboard is re-attempted.
+if not cfg.get('gateway'):
+    sys.exit(1)
+sys.exit(0)
+PY
 }
 
 # ---------------------------------------------------------------------------
@@ -680,24 +752,33 @@ main() {
 
   [[ -n "$LMSTUDIO_MODEL_ID_RESOLVED" ]] || die "llmster is reachable, but no LLM model could be selected. Load a model with 'lms load <model-id>' and rerun."
 
-  backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
-
-  local compat_attempts=("$OPENCLAW_AMD_COMPAT")
-  if [[ "$OPENCLAW_AMD_COMPAT" == "anthropic" && "$OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK" == "1" ]]; then
-    compat_attempts+=("openai")
-  fi
-
-  local compat
   local configured=0
-  for compat in "${compat_attempts[@]}"; do
-    if run_noninteractive_onboard "$compat"; then
-      configured=1
-      break
-    fi
-    warn "OpenClaw onboarding failed for compatibility mode '${compat}'."
-  done
+  if is_openclaw_configured; then
+    info "OpenClaw already configured for ${OPENCLAW_AMD_PROVIDER_ID}/${LMSTUDIO_MODEL_ID_RESOLVED} — skipping onboard"
+    configured=1
+    RAN_ONBOARD=1
+    # Treat daemon as installed if systemd is ready; we just can't tell for sure
+    # without re-running onboard, so assume the previous run set it up correctly.
+    DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
+  else
+    backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
 
-  (( configured == 1 )) || die "OpenClaw was installed, but non-interactive onboarding against llmster failed. Try setting OPENCLAW_AMD_MODEL_ID explicitly and rerun."
+    local compat_attempts=("$OPENCLAW_AMD_COMPAT")
+    if [[ "$OPENCLAW_AMD_COMPAT" == "anthropic" && "$OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK" == "1" ]]; then
+      compat_attempts+=("openai")
+    fi
+
+    local compat
+    for compat in "${compat_attempts[@]}"; do
+      if run_noninteractive_onboard "$compat"; then
+        configured=1
+        break
+      fi
+      warn "OpenClaw onboarding failed for compatibility mode '${compat}'."
+    done
+
+    (( configured == 1 )) || die "OpenClaw was installed, but non-interactive onboarding against llmster failed. Try setting OPENCLAW_AMD_MODEL_ID explicitly and rerun."
+  fi
 
   auto_tune_config
   print_next_steps
