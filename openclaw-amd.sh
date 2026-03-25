@@ -19,11 +19,6 @@ OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK="${OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK:-1}"
 LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY:-lmstudio}"
 LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 
-# ROCm version to install inside WSL2.
-# Requires a compatible AMD Adrenalin driver on the Windows host (26.1.1 or newer).
-# See: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/wsl/wsl_compatibility.html
-ROCM_VERSION="${ROCM_VERSION:-latest}"                       # "latest" auto-resolves; or pin e.g. "7.2"
-ROCM_AMDGPU_INSTALL_DEB="${ROCM_AMDGPU_INSTALL_DEB:-}"      # override full deb URL if needed
 
 SYSTEMD_READY=0
 DAEMON_INSTALLED=0
@@ -35,6 +30,11 @@ LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
 
 print_banner() {
+  printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░░█░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
   printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
   printf '\n'
 }
@@ -152,90 +152,6 @@ apt_install_if_missing() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# AMD ROCm driver installation for WSL2
-# Installs the amdgpu-install script and ROCm with the 'wsl' usecase.
-# The Windows host must already have a compatible AMD Adrenalin driver installed.
-# IMPORTANT: never pass --dkms inside WSL2; the kernel module lives on the host.
-# ---------------------------------------------------------------------------
-install_rocm_wsl() {
-  if rocminfo >/dev/null 2>&1; then
-    info "ROCm already detected (rocminfo succeeded) — skipping driver install"
-    return 0
-  fi
-
-  info "Installing AMD ROCm ${ROCM_VERSION} for WSL2"
-
-  # Detect Ubuntu codename for the repo URL
-  local codename
-  codename="$(. /etc/os-release 2>/dev/null && printf '%s' "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
-  [[ -n "$codename" ]] || die "Cannot determine Ubuntu codename from /etc/os-release"
-
-  # Map codename -> amdgpu-install repo sub-path used by AMD
-  # noble = 24.04, jammy = 22.04 — add more as AMD publishes them
-  local repo_codename="$codename"
-
-  # If amdgpu-install is already present (e.g. the .deb was installed in a prior
-  # partial run), skip the download and apt-install step and go straight to the
-  # usecase install so we don't re-download the package unnecessarily.
-  if ! have amdgpu-install; then
-    # Build the .deb URL unless the caller overrode it.
-    # AMD publishes a /latest/ symlink on repo.radeon.com that always points to the
-    # newest amdgpu-install release, so we use that by default to stay current.
-    # If the caller sets ROCM_VERSION to a specific tag (e.g. "7.2") the script will
-    # try to resolve the matching deb filename from that versioned path instead.
-    local deb_url="$ROCM_AMDGPU_INSTALL_DEB"
-    if [[ -z "$deb_url" ]]; then
-      if [[ "$ROCM_VERSION" == "latest" ]]; then
-        # Discover the actual deb name from the /latest/ directory listing
-        local index_url="https://repo.radeon.com/amdgpu-install/latest/ubuntu/${repo_codename}/"
-        local deb_name
-        deb_name="$(curl -fsSL --max-time 10 "$index_url" \
-          | grep -oP 'amdgpu-install_[0-9][^"]+\.deb' \
-          | sort -V | tail -1)"
-        [[ -n "$deb_name" ]] || die "Could not discover amdgpu-install deb from ${index_url}"
-        deb_url="${index_url}${deb_name}"
-      else
-        # Versioned path: encode X.Y -> X0Y00, e.g. 7.2 -> 70200
-        local deb_name
-        deb_name="$(python3 - "$ROCM_VERSION" <<'PY'
-import sys
-ver = sys.argv[1].strip()
-parts = ver.split(".")
-major = int(parts[0])
-minor = int(parts[1]) if len(parts) > 1 else 0
-patch = int(parts[2]) if len(parts) > 2 else 0
-encoded = f"{major}{minor:02d}{patch:02d}"
-print(f"amdgpu-install_{ver}.{encoded}-1_all.deb")
-PY
-)"
-        deb_url="https://repo.radeon.com/amdgpu-install/${ROCM_VERSION}/ubuntu/${repo_codename}/${deb_name}"
-      fi
-    fi
-
-    local tmp_deb
-    tmp_deb="$(mktemp /tmp/amdgpu-install.XXXXXX.deb)"
-    trap 'rm -f "$tmp_deb"' RETURN
-
-    info "Downloading amdgpu-install from: ${deb_url}"
-    curl -fSL --retry 3 -o "$tmp_deb" "$deb_url" \
-      || die "Failed to download amdgpu-install package. Check ROCM_VERSION (${ROCM_VERSION}) and your Adrenalin driver version."
-
-    apt_install_if_missing wget gnupg2 initramfs-tools
-    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "$tmp_deb"
-  else
-    info "amdgpu-install already present — skipping package download"
-  fi
-
-  info "Running amdgpu-install --usecase=wsl,rocm --no-dkms"
-  DEBIAN_FRONTEND=noninteractive run_root amdgpu-install --usecase=wsl,rocm --no-dkms -y \
-    || die "amdgpu-install failed. Ensure the AMD Adrenalin driver on Windows matches ROCm ${ROCM_VERSION}."
-
-  # Add user to render and video groups so userspace tools can access the GPU
-  run_root usermod -a -G render,video "$USER" 2>/dev/null || true
-
-  info "ROCm ${ROCM_VERSION} installed. You may need to run 'wsl --shutdown' and reopen WSL for group membership to take effect."
-}
 
 # ---------------------------------------------------------------------------
 # llmster / lms installation
@@ -266,17 +182,38 @@ refresh_lms_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Ensure the ROCm-capable llama.cpp runtime is installed in llmster.
-# On AMD/ROCm systems llmster selects the ROCm backend automatically once
-# the runtime is present.
+# Select the Vulkan llama.cpp runtime in llmster.
+# In WSL2 on AMD APUs, ROCm GPU compute passthrough is broken at the driver
+# level (gfx1151 / Ryzen AI Max — open AMD bug). The Vulkan backend works
+# via the WSL2 graphics subsystem and provides real GPU acceleration.
 # ---------------------------------------------------------------------------
-ensure_lms_rocm_runtime() {
-  info "Ensuring llmster ROCm runtime is installed"
-  # Try both subcommand spellings across llmster versions
-  "$LMS_BIN" runtime install llama.cpp 2>/dev/null \
-    || "$LMS_BIN" runtime get llama.cpp 2>/dev/null \
-    || true  # non-fatal: may already be installed or unsupported on this build
-  info "llmster runtime ready"
+ensure_lms_vulkan_runtime() {
+  info "Selecting Vulkan runtime in llmster"
+
+  # Discover the installed Vulkan runtime name (version-agnostic)
+  local vulkan_runtime
+  vulkan_runtime="$("$LMS_BIN" runtime ls 2>/dev/null \
+    | grep -oP 'llama\.cpp-linux-x86_64-vulkan[^\s]+' \
+    | head -1 || true)"
+
+  if [[ -z "$vulkan_runtime" ]]; then
+    info "Vulkan runtime not found — attempting install"
+    "$LMS_BIN" runtime install llama.cpp-vulkan 2>/dev/null \
+      || "$LMS_BIN" runtime get llama.cpp-vulkan 2>/dev/null \
+      || true
+    vulkan_runtime="$("$LMS_BIN" runtime ls 2>/dev/null \
+      | grep -oP 'llama\.cpp-linux-x86_64-vulkan[^\s]+' \
+      | head -1 || true)"
+  fi
+
+  if [[ -n "$vulkan_runtime" ]]; then
+    "$LMS_BIN" runtime use "$vulkan_runtime" 2>/dev/null \
+      || "$LMS_BIN" runtime select "$vulkan_runtime" 2>/dev/null \
+      || true
+    info "Vulkan runtime selected: ${vulkan_runtime}"
+  else
+    warn "Could not find or install a Vulkan runtime — llmster will use the CPU backend"
+  fi
 }
 
 # Persist ~/.lmstudio/bin in shell profiles so future shells pick it up
@@ -378,7 +315,7 @@ start_llmster_server() {
         info "Model already on disk — skipping download: ${OPENCLAW_AMD_MODEL_ID}"
       fi
 
-      info "Loading model (gpu=max, context=${OPENCLAW_AMD_CONTEXT_TOKENS}, flash_attention=on, mmap=on)"
+      info "Loading model (gpu=max, context=${OPENCLAW_AMD_CONTEXT_TOKENS}, flash_attn=on, mmap=on)"
       load_model_via_api || load_model_via_cli
     fi
   fi
@@ -864,11 +801,6 @@ main() {
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
 
-  # Install AMD ROCm drivers for WSL2 so the GPU is accessible from Linux
-  if is_wsl; then
-    install_rocm_wsl
-  fi
-
   install_homebrew_if_missing
   install_chrome_if_missing
   install_or_update_openclaw
@@ -878,7 +810,7 @@ main() {
   # Install llmster (headless LM Studio core) and start the local API server
   install_llmster
   persist_lms_path
-  ensure_lms_rocm_runtime
+  ensure_lms_vulkan_runtime
   start_llmster_server
 
   if ! resolve_lmstudio_endpoint; then
