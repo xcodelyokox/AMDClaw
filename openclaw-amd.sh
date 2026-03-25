@@ -471,10 +471,10 @@ backup_openclaw_config() {
 }
 
 # Returns 0 if openclaw.json already contains a complete entry for the current
-# provider and model, indicating that onboarding ran successfully before.
+# provider, model, AND compat mode — so a compat change forces re-onboarding.
 is_openclaw_configured() {
   [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 1
-  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "$OPENCLAW_AMD_PROVIDER_ID" "$LMSTUDIO_MODEL_ID_RESOLVED"
+  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "$OPENCLAW_AMD_PROVIDER_ID" "$LMSTUDIO_MODEL_ID_RESOLVED" "$OPENCLAW_AMD_COMPAT"
 import json, sys
 from pathlib import Path
 try:
@@ -483,12 +483,24 @@ except Exception:
     sys.exit(1)
 provider_id = sys.argv[2]
 model_id    = sys.argv[3]
+compat      = sys.argv[4]  # "openai" or "anthropic"
+
 providers = cfg.get('models', {}).get('providers', {})
 if provider_id not in providers:
     sys.exit(1)
-models = providers[provider_id].get('models', [])
+provider = providers[provider_id]
+
+models = provider.get('models', [])
 if not any(isinstance(m, dict) and m.get('id') == model_id for m in models):
     sys.exit(1)
+
+# Check the API compat mode matches what the script expects.
+# anthropic compat sets api="anthropic-messages"; openai sets api="openai".
+expected_api = 'anthropic-messages' if compat == 'anthropic' else 'openai'
+actual_api   = provider.get('api', '')
+if actual_api != expected_api:
+    sys.exit(1)
+
 # Also require a gateway entry so a half-finished onboard is re-attempted.
 if not cfg.get('gateway'):
     sys.exit(1)
