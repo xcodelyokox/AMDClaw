@@ -11,9 +11,9 @@ Run this from a **PowerShell** window on your Windows machine. It handles everyt
 1. Self-elevates to Administrator if needed
 2. Enables WSL2 (reboots and resumes automatically if required)
 3. Installs Ubuntu 24.04 and prompts you to create a Unix username and password
-4. Installs AMD ROCm drivers inside WSL2
-5. Installs llmster and starts the API server
-6. Loads `qwen/qwen3-coder-next`
+4. Installs llmster and starts the API server
+5. Selects the Vulkan GPU backend for AMD GPU acceleration
+6. Downloads and loads `nvidia/nemotron-3-nano-4b`
 7. Installs and configures OpenClaw
 
 ```powershell
@@ -46,27 +46,27 @@ curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-a
 - handles the systemd-restart step (`exit 10`) transparently.
 
 **Bash (`openclaw-amd.sh`):**
-- installs the Linux packages the AMD/ROCm guide relies on,
+- installs the required Linux packages,
 - creates `~/.config/systemd/user` and `~/.npm-global`,
 - persists `~/.npm-global/bin` into your shell PATH,
 - enables systemd in `/etc/wsl.conf` when needed,
-- **installs AMD ROCm drivers inside WSL2** (`amdgpu-install --usecase=wsl,rocm --no-dkms`),
 - installs Homebrew and persists `brew shellenv`,
+- **installs Google Chrome** (required for `openclaw dashboard` to open a browser tab from WSL2),
 - installs or updates OpenClaw via the official installer,
 - **installs llmster** (the headless LM Studio core) via the official installer,
+- **selects the Vulkan llama.cpp runtime** for GPU acceleration,
 - **starts the llmster daemon and API server** on `127.0.0.1:1234`,
-- **loads `qwen/qwen3-coder-next` (Qwen3-Coder-Next 80B)** by default,
+- **downloads and loads `nvidia/nemotron-3-nano-4b`** by default (with `gpu_offload=max`, `context=190000`, `mmap=on`),
 - auto-detects the loaded model and its context length from the local llmster API,
 - runs `openclaw onboard` non-interactively against llmster,
-- applies the tested RadeonClaw profile by default.
+- applies the tested RadeonClaw profile by default,
+- **starts the OpenClaw gateway**, opens the dashboard in Chrome, then **hatches in TUI** automatically.
 
 ---
 
 ## Default model
 
-**`qwen/qwen3-coder-next`** — Qwen3-Coder-Next 80B MoE (3B active parameters, 256K context).
-
-Hardware requirements: >45 GB VRAM/combined RAM for a 4-bit quant, >30 GB for a 2-bit quant.
+**`nvidia/nemotron-3-nano-4b`** — Nemotron 3 Nano 4B.
 
 Override with `OPENCLAW_AMD_MODEL_ID=<model-id>` (see Useful overrides below).
 
@@ -75,17 +75,9 @@ Override with `OPENCLAW_AMD_MODEL_ID=<model-id>` (see Useful overrides below).
 The script hardcodes the RadeonClaw-style defaults unless you override them:
 
 - `OPENCLAW_AMD_CONTEXT_TOKENS=190000`
-- `OPENCLAW_AMD_MODEL_MAX_TOKENS=190000`
+- `OPENCLAW_AMD_MODEL_MAX_TOKENS=64000`
 - `OPENCLAW_AMD_MAX_AGENTS=2`
 - `OPENCLAW_AMD_MAX_SUBAGENTS=2`
-
-## ROCm version
-
-By default the script uses `ROCM_VERSION=latest`, which auto-resolves the newest `amdgpu-install` package from AMD's `/latest/` repo symlink — so it will always pull the current release without requiring script edits. As of early 2026 that resolves to **ROCm 7.2**.
-
-Requires **AMD Adrenalin Edition 26.1.1 or newer** on your Windows host. Consult AMD's [WSL2 compatibility matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/wsl/wsl_compatibility.html) if you need to pin to a specific version.
-
-After ROCm is installed the script adds your user to the `render` and `video` groups. If this is the first install, run `wsl --shutdown` from PowerShell and reopen Ubuntu to pick up the group membership, then rerun the one-liner.
 
 ## What it intentionally does **not** automate
 
@@ -102,21 +94,17 @@ After ROCm is installed the script adds your user to the `render` and `video` gr
 OPENCLAW_AMD_MODEL_ID=lmstudio-community/Qwen3-Coder-480B-A35B-GGUF \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 
-# Pin to a specific ROCm version instead of auto-resolving latest
-ROCM_VERSION=7.2 \
+# Use the default model explicitly
+OPENCLAW_AMD_MODEL_ID=nvidia/nemotron-3-nano-4b \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 
-# Use a custom amdgpu-install .deb (e.g. for an unsupported Ubuntu codename)
-ROCM_AMDGPU_INSTALL_DEB=https://your-mirror/amdgpu-install_7.2.70200-1_all.deb \
-curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
-
-# Use OpenAI-compatible llmster endpoints instead of Anthropic-compatible
-OPENCLAW_AMD_COMPAT=openai \
+# Use Anthropic-compatible llmster endpoints instead of OpenAI-compatible (default)
+OPENCLAW_AMD_COMPAT=anthropic \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 
 # Override the hardcoded RadeonClaw defaults explicitly
 OPENCLAW_AMD_CONTEXT_TOKENS=190000 \
-OPENCLAW_AMD_MODEL_MAX_TOKENS=190000 \
+OPENCLAW_AMD_MODEL_MAX_TOKENS=64000 \
 OPENCLAW_AMD_MAX_AGENTS=2 \
 OPENCLAW_AMD_MAX_SUBAGENTS=2 \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
@@ -127,12 +115,23 @@ curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-a
 - If systemd was not active yet, the bash script writes `/etc/wsl.conf` and exits with code 10. The PowerShell bootstrap handles this automatically (runs `wsl --shutdown` and resumes). If using Option B, run `wsl --shutdown` from PowerShell, reopen Ubuntu, and rerun the curl command.
 - If no model is loaded after llmster starts, the script exits with instructions to download a model with `lms get <model-id>` and rerun.
 
+## Finish line
+
+When everything succeeds the script automatically:
+
+1. Starts the OpenClaw gateway (background process, or via systemd daemon if available)
+2. Opens the OpenClaw dashboard in Google Chrome
+3. Hatches in TUI — drops you into the live terminal dashboard
+
+Press `Q` to quit the TUI at any time. The gateway keeps running in the background.
+
 ## llmster quick-reference
 
 ```bash
-lms status                       # check daemon + server status
-lms server stop                  # stop the API server
-lms daemon down                  # stop the daemon
-lms get qwen/qwen3-coder-next    # download the default model
-lms load qwen/qwen3-coder-next   # load it into memory
+lms status                            # check daemon + server status
+lms server stop                       # stop the API server
+lms daemon down                       # stop the daemon
+lms runtime ls                        # list runtimes and see which is selected
+lms get nvidia/nemotron-3-nano-4b     # download the default model
+lms load nvidia/nemotron-3-nano-4b    # load it into memory
 ```
