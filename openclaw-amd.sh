@@ -7,7 +7,7 @@ SCRIPT_VERSION="0.3.0"
 OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
 OPENCLAW_AMD_PROVIDER_ID="${OPENCLAW_AMD_PROVIDER_ID:-lmstudio}"
 OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-anthropic}"
-OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-zai-org/glm-4.7-flash}"
+OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-nvidia/nemotron-3-nano-4b}"
 OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
 OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-64000}"
 OPENCLAW_AMD_MAX_AGENTS="${OPENCLAW_AMD_MAX_AGENTS:-2}"
@@ -33,6 +33,11 @@ LMSTUDIO_ROOT="http://127.0.0.1:${LMSTUDIO_PORT}"
 LMSTUDIO_MODEL_ID_RESOLVED=""
 LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
+
+print_banner() {
+  printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
+  printf '\n'
+}
 
 info() {
   printf '\033[1;34m[INFO]\033[0m %s\n' "$*"
@@ -388,6 +393,34 @@ PY
   exit 10
 }
 
+# ---------------------------------------------------------------------------
+# Google Chrome installation
+# Required so that `openclaw dashboard` can open a browser tab from WSL2.
+# Skipped if chrome/chromium is already present.
+# ---------------------------------------------------------------------------
+install_chrome_if_missing() {
+  if have google-chrome-stable || have google-chrome || have chromium-browser || have chromium; then
+    info "Chrome/Chromium already installed — skipping"
+    return 0
+  fi
+
+  info "Installing Google Chrome"
+  apt_install_if_missing wget gnupg2
+
+  # Add the Google signing key and repo
+  wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
+    | run_root gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+
+  printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' \
+    | run_root tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+
+  run_root apt-get update
+  DEBIAN_FRONTEND=noninteractive run_root apt-get install -y google-chrome-stable
+
+  have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH. The dashboard may need --no-open."
+  info "Google Chrome installed"
+}
+
 install_or_update_openclaw() {
   prepare_npm_global_prefix
   refresh_openclaw_path
@@ -694,7 +727,7 @@ PY
   info "Applied RadeonClaw-default OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
 }
 
-print_next_steps() {
+print_summary() {
   printf '\n'
   info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
   printf '  llmster endpoint  : %s\n' "$LMSTUDIO_ROOT"
@@ -704,23 +737,55 @@ print_next_steps() {
   printf '  Agent concurrency : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
   printf '  Subagent conc.    : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
   printf '\n'
-  if (( DAEMON_INSTALLED )); then
-    printf 'Next commands:\n'
-    printf '  openclaw status\n'
-    printf '  openclaw dashboard\n'
-  else
-    printf 'Next commands:\n'
-    printf '  openclaw gateway run\n'
-    printf '  openclaw dashboard\n'
-  fi
-  printf '\n'
   printf 'llmster commands:\n'
   printf '  lms status         # check daemon + server status\n'
   printf '  lms server stop    # stop the API server\n'
   printf '  lms daemon down    # stop the daemon\n'
+  printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# Start the OpenClaw gateway (if not already running via daemon), open the
+# dashboard in Chrome, then hatch in TUI.
+# ---------------------------------------------------------------------------
+launch_openclaw() {
+  print_summary
+
+  # Ensure the gateway is running before opening the dashboard / TUI.
+  if (( DAEMON_INSTALLED )); then
+    info "Gateway daemon is installed — ensuring it is running"
+    openclaw gateway start 2>/dev/null || true
+  else
+    info "Starting OpenClaw gateway in the background"
+    # Run the gateway detached so this script can continue to open the TUI.
+    nohup openclaw gateway run \
+      --port "$OPENCLAW_AMD_GATEWAY_PORT" \
+      --bind "$OPENCLAW_AMD_GATEWAY_BIND" \
+      >/tmp/openclaw-gateway.log 2>&1 &
+    disown
+
+    # Give the gateway a moment to bind its port before proceeding.
+    local attempts=0
+    while (( attempts < 15 )); do
+      if curl -fsS --max-time 1 \
+           "http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+      (( attempts++ )) || true
+    done
+  fi
+
+  info "Opening OpenClaw dashboard in Chrome"
+  openclaw dashboard 2>/dev/null || true
+
+  info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
+  printf '\n'
+  exec openclaw tui
 }
 
 main() {
+  print_banner
   require_linux
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
@@ -732,6 +797,7 @@ main() {
   fi
 
   install_homebrew_if_missing
+  install_chrome_if_missing
   install_or_update_openclaw
   prepare_npm_global_prefix
   require_openclaw
@@ -781,7 +847,7 @@ main() {
   fi
 
   auto_tune_config
-  print_next_steps
+  launch_openclaw
 }
 
 main "$@"
