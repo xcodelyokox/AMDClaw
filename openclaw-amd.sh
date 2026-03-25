@@ -6,7 +6,7 @@ SCRIPT_VERSION="0.3.0"
 
 OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
 OPENCLAW_AMD_PROVIDER_ID="${OPENCLAW_AMD_PROVIDER_ID:-lmstudio}"
-OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-anthropic}"
+OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-openai}"
 OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-nvidia/nemotron-3-nano-4b}"
 OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
 OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-64000}"
@@ -777,7 +777,8 @@ launch_openclaw() {
   fi
 
   info "Opening OpenClaw dashboard in Chrome"
-  openclaw dashboard 2>/dev/null || true
+  openclaw dashboard 2>/dev/null &
+  disown
 
   info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
   printf '\n'
