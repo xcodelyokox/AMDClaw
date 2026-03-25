@@ -35,6 +35,11 @@ LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
 
 print_banner() {
+  printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░░█░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
   printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
   printf '\n'
 }
@@ -417,7 +422,11 @@ install_chrome_if_missing() {
   run_root apt-get update
   DEBIAN_FRONTEND=noninteractive run_root apt-get install -y google-chrome-stable
 
-  have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH. The dashboard may need --no-open."
+  have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH."
+
+  # wslu provides wslview, which correctly hands URLs off to the Windows browser
+  apt_install_if_missing wslu
+
   info "Google Chrome installed"
 }
 
@@ -776,9 +785,21 @@ launch_openclaw() {
     done
   fi
 
-  info "Opening OpenClaw dashboard in Chrome"
-  openclaw dashboard 2>/dev/null &
-  disown
+  info "Opening OpenClaw dashboard"
+  local dashboard_url
+  dashboard_url="$(openclaw dashboard --no-open 2>/dev/null | grep -oP 'https?://\S+' | head -1 || true)"
+  if [[ -n "$dashboard_url" ]]; then
+    info "Dashboard: ${dashboard_url}"
+    if have xdg-open; then
+      xdg-open "$dashboard_url" >/dev/null 2>&1 &
+      disown
+    elif have wslview; then
+      wslview "$dashboard_url" >/dev/null 2>&1 &
+      disown
+    fi
+  else
+    info "Dashboard: http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
+  fi
 
   info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
   printf '\n'
