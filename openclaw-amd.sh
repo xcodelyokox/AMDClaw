@@ -270,6 +270,20 @@ refresh_lms_path() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Ensure the ROCm-capable llama.cpp runtime is installed in llmster.
+# On AMD/ROCm systems llmster selects the ROCm backend automatically once
+# the runtime is present.
+# ---------------------------------------------------------------------------
+ensure_lms_rocm_runtime() {
+  info "Ensuring llmster ROCm runtime is installed"
+  # Try both subcommand spellings across llmster versions
+  "$LMS_BIN" runtime install llama.cpp 2>/dev/null \
+    || "$LMS_BIN" runtime get llama.cpp 2>/dev/null \
+    || true  # non-fatal: may already be installed or unsupported on this build
+  info "llmster runtime ready"
+}
+
 # Persist ~/.lmstudio/bin in shell profiles so future shells pick it up
 persist_lms_path() {
   local lms_path_line='export PATH="$HOME/.lmstudio/bin:$PATH"'
@@ -303,49 +317,76 @@ lms_server_is_up() {
     "http://127.0.0.1:${LMSTUDIO_PORT}/v1/models" >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# Load the model via the llmster REST API so we can set flash_attention and
+# mmap, which are not exposed as flags on `lms load`.
+# Falls back to the CLI if the REST endpoint is unavailable or returns an error.
+# ---------------------------------------------------------------------------
+load_model_via_api() {
+  local payload
+  payload="$(python3 -c "
+import json
+print(json.dumps({
+    'model':          '${OPENCLAW_AMD_MODEL_ID}',
+    'context_length': ${OPENCLAW_AMD_CONTEXT_TOKENS},
+    'gpu_offload':    'max',
+    'flash_attention': True,
+    'try_mmap':       True,
+}))
+")"
+  curl -fsS --max-time 120 \
+    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "http://127.0.0.1:${LMSTUDIO_PORT}/api/v1/models/load" >/dev/null 2>&1
+}
+
+load_model_via_cli() {
+  info "Falling back to lms load CLI (no flash_attention/mmap via this path)"
+  "$LMS_BIN" load "$OPENCLAW_AMD_MODEL_ID" \
+    --gpu max \
+    --context-length "$OPENCLAW_AMD_CONTEXT_TOKENS" \
+    --yes \
+    || die "Failed to load model '${OPENCLAW_AMD_MODEL_ID}'."
+}
+
 start_llmster_server() {
   info "Starting llmster daemon"
   "$LMS_BIN" daemon up 2>/dev/null || true
+
+  # Start the API server first so the REST load endpoint is available.
+  if lms_server_is_up; then
+    info "llmster API server already running on port ${LMSTUDIO_PORT}"
+  else
+    info "Starting llmster API server on port ${LMSTUDIO_PORT}"
+    "$LMS_BIN" server start --port "$LMSTUDIO_PORT" 2>/dev/null || true
+
+    local attempts=0
+    while (( attempts < 20 )); do
+      if lms_server_is_up; then break; fi
+      sleep 1
+      (( attempts++ )) || true
+    done
+    lms_server_is_up \
+      || die "llmster API server did not become reachable on port ${LMSTUDIO_PORT} after 20 seconds."
+  fi
 
   if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
     if lms_model_is_loaded; then
       info "Model already loaded in memory: ${OPENCLAW_AMD_MODEL_ID}"
     else
-      # Only download if not already on disk; a completed download is not re-fetched.
-      if lms_model_is_on_disk; then
-        info "Model already on disk — skipping download: ${OPENCLAW_AMD_MODEL_ID}"
-      else
+      if ! lms_model_is_on_disk; then
         info "Downloading model: ${OPENCLAW_AMD_MODEL_ID}"
         "$LMS_BIN" get "$OPENCLAW_AMD_MODEL_ID" --yes \
           || die "Failed to download model '${OPENCLAW_AMD_MODEL_ID}'. Check the model ID and your internet connection."
+      else
+        info "Model already on disk — skipping download: ${OPENCLAW_AMD_MODEL_ID}"
       fi
 
-      info "Loading model: ${OPENCLAW_AMD_MODEL_ID}"
-      "$LMS_BIN" load "$OPENCLAW_AMD_MODEL_ID" --yes \
-        || die "Failed to load model '${OPENCLAW_AMD_MODEL_ID}'."
+      info "Loading model (gpu=max, context=${OPENCLAW_AMD_CONTEXT_TOKENS}, flash_attention=on, mmap=on)"
+      load_model_via_api || load_model_via_cli
     fi
   fi
-
-  # Skip server start (and the readiness wait) if it is already listening.
-  if lms_server_is_up; then
-    info "llmster API server already running on port ${LMSTUDIO_PORT}"
-    return 0
-  fi
-
-  info "Starting llmster API server on port ${LMSTUDIO_PORT}"
-  "$LMS_BIN" server start --port "$LMSTUDIO_PORT" 2>/dev/null || true
-
-  # Wait for the server socket to be ready
-  local attempts=0
-  while (( attempts < 20 )); do
-    if lms_server_is_up; then
-      return 0
-    fi
-    sleep 1
-    (( attempts++ )) || true
-  done
-
-  die "llmster API server did not become reachable on port ${LMSTUDIO_PORT} after 20 seconds."
 }
 
 curl_json() {
@@ -815,6 +856,9 @@ launch_openclaw() {
 
   info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
   printf '\n'
+  # Reset terminal mode before handing over — prevents Enter/input being swallowed
+  # by leftover raw-mode state from earlier script output.
+  stty sane 2>/dev/null || true
   exec openclaw tui
 }
 
@@ -839,6 +883,7 @@ main() {
   # Install llmster (headless LM Studio core) and start the local API server
   install_llmster
   persist_lms_path
+  ensure_lms_rocm_runtime
   start_llmster_server
 
   if ! resolve_lmstudio_endpoint; then
