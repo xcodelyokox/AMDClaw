@@ -1,4 +1,4 @@
-# OpenClaw on AMD — LM Studio + WSL2 Bootstrap
+# OpenClaw on AMD — LM Studio + WSL2 Quick Start
 
 This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single command. LM Studio runs natively on Windows with GPU offload; OpenClaw runs inside WSL2 and connects to LM Studio over the LAN.
 
@@ -18,7 +18,7 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 
 ---
 
-## Option A — Full Windows bootstrap (recommended)
+## Option A — Full Windows Quick Start (recommended)
 
 Run this from a **PowerShell** window. It handles everything from scratch:
 
@@ -150,5 +150,5 @@ The bash script runs `openclaw onboard` three times for a seamless experience:
 
 ## Exit behavior
 
-- If systemd was not active yet, the bash script writes `/etc/wsl.conf` and exits with code 10. The PowerShell bootstrap handles this automatically. If using Option B, run `wsl --shutdown` from PowerShell, reopen Ubuntu, and rerun.
+- If systemd was not active yet, the bash script writes `/etc/wsl.conf` and exits with code 10. The PowerShell Quick Start handles this automatically. If using Option B, run `wsl --shutdown` from PowerShell, reopen Ubuntu, and rerun.
 - If LM Studio is not reachable, the script installs everything it can, then exits with instructions to start the LM Studio server and rerun.
