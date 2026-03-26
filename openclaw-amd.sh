@@ -639,15 +639,6 @@ if entry is None:
 entry['contextWindow'] = context_tokens
 entry['maxTokens'] = model_max_tokens
 
-# --- Enable hooks: boot-md, command-logger, session-memory ---
-hooks = cfg.setdefault('hooks', {})
-internal = hooks.setdefault('internal', {})
-internal['enabled'] = True
-entries = internal.setdefault('entries', {})
-for hook_name in ('boot-md', 'command-logger', 'session-memory'):
-    hook = entries.setdefault(hook_name, {})
-    hook['enabled'] = True
-
 # --- Local embeddings for Memory.md (embeddinggemma-300m via node-llama-cpp) ---
 ms = defaults.setdefault('memorySearch', {})
 ms['enabled'] = True
@@ -672,63 +663,7 @@ config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encodi
 PY
 
   info "Applied OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
-  info "Hooks enabled: boot-md, command-logger, session-memory"
   info "Local embeddings configured (embeddinggemma-300m — will auto-download on first use)"
-}
-
-# ---------------------------------------------------------------------------
-# Install ClawHub skills: clawhub, himalaya, nano-pdf
-# ---------------------------------------------------------------------------
-install_skills() {
-  # Ensure clawhub CLI is available — try npm first, then brew
-  if ! have clawhub; then
-    info "Installing ClawHub CLI via npm..."
-    if npm install -g clawhub 2>&1; then
-      hash -r 2>/dev/null || true
-      info "ClawHub CLI installed via npm"
-    else
-      warn "npm install -g clawhub failed (see output above)"
-      if have brew; then
-        info "Trying Homebrew: brew install clawhub..."
-        if brew install clawhub 2>&1; then
-          hash -r 2>/dev/null || true
-          info "ClawHub CLI installed via Homebrew"
-        else
-          warn "brew install clawhub also failed (see output above)"
-        fi
-      else
-        warn "Homebrew not available. Will try npx fallback for skill installs."
-      fi
-    fi
-  else
-    info "ClawHub CLI already installed"
-  fi
-
-  local -a skills=(steipete/clawdhub lamelas/himalaya steipete/nano-pdf)
-  local skill
-  for skill in "${skills[@]}"; do
-    info "Installing skill: ${skill}"
-    if have clawhub; then
-      if ! clawhub install "$skill" 2>&1; then
-        warn "clawhub install ${skill} failed (see output above)"
-      fi
-    else
-      info "  Falling back to: npx -y clawhub install ${skill}"
-      if ! npx -y clawhub install "$skill" 2>&1; then
-        warn "npx clawhub install ${skill} failed (see output above)"
-        warn "You can install it later with: npx clawhub install ${skill}"
-      fi
-    fi
-  done
-
-  # Enable hooks via CLI as a safety net (in case config write didn't take)
-  local -a hooks_to_enable=(boot-md command-logger session-memory)
-  local hook
-  for hook in "${hooks_to_enable[@]}"; do
-    openclaw hooks enable "$hook" 2>/dev/null || true
-  done
-
-  info "Skills and hooks configured"
 }
 
 # ---------------------------------------------------------------------------
@@ -1015,8 +950,18 @@ main() {
 
   auto_tune_config
   seed_workspace
-  install_skills
-  launch_openclaw
+
+  # Interactive onboard pass — lets the user configure hooks, skills, channels
+  # The non-interactive pass above already set up provider/model/gateway,
+  # so this second pass detects existing config and only walks through the
+  # remaining steps (hooks, skills, channels, web search).
+  info "Launching interactive onboard for hooks, skills, and channels setup..."
+  printf '\n'
+  openclaw onboard < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
+  printf '\n'
+
+  print_summary
+  info "Setup complete. OpenClaw is ready."
 }
 
 main "$@"
