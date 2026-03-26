@@ -231,7 +231,7 @@ resolve_lmstudio_url() {
   for c in "${unique[@]}"; do
     info "  Trying ${c}:${LMSTUDIO_PORT} ..."
     if probe_lmstudio "$c"; then
-      LMSTUDIO_BASE_URL="http://${c}:${LMSTUDIO_PORT}/v1"
+      LMSTUDIO_BASE_URL="http://${c}:${LMSTUDIO_PORT}"
       info "LM Studio found at: $LMSTUDIO_BASE_URL"
       return 0
     fi
@@ -246,14 +246,14 @@ resolve_lmstudio_url() {
   read -r -p "Enter the LM Studio host IP (e.g. 192.168.0.218): " user_ip < /dev/tty
   user_ip="${user_ip// /}"
   if [[ -z "$user_ip" ]]; then
-    die "No IP provided. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.0.218:${LMSTUDIO_PORT}/v1)."
+    die "No IP provided. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.0.218:${LMSTUDIO_PORT})."
   fi
-  LMSTUDIO_BASE_URL="http://${user_ip}:${LMSTUDIO_PORT}/v1"
+  LMSTUDIO_BASE_URL="http://${user_ip}:${LMSTUDIO_PORT}"
   info "Using user-provided LM Studio URL: $LMSTUDIO_BASE_URL"
 }
 
 wait_for_lmstudio() {
-  local url="${LMSTUDIO_BASE_URL}/models"
+  local url="${LMSTUDIO_BASE_URL}/v1/models"
   local attempts=0
   local max_attempts=10
 
@@ -368,7 +368,7 @@ select_lmstudio_model() {
     return 0
   fi
 
-  local models_url="${LMSTUDIO_BASE_URL}/models"
+  local models_url="${LMSTUDIO_BASE_URL}/v1/models"
   local response
   response="$(curl -fsS --max-time 5 "$models_url")" \
     || die "Failed to query models from LM Studio at ${models_url}"
@@ -496,7 +496,7 @@ run_noninteractive_onboard() {
     --custom-base-url "$base_url"
     --custom-model-id "$OPENCLAW_AMD_MODEL_ID"
     --custom-provider-id "$provider_id"
-    --custom-compatibility "openai"
+    --custom-compatibility "anthropic"
     --custom-api-key "$api_key"
     --secret-input-mode plaintext
     --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
@@ -525,7 +525,7 @@ run_noninteractive_onboard() {
       --custom-base-url "$base_url"
       --custom-model-id "$OPENCLAW_AMD_MODEL_ID"
       --custom-provider-id "$provider_id"
-      --custom-compatibility "openai"
+      --custom-compatibility "anthropic"
       --custom-api-key "$api_key"
       --secret-input-mode plaintext
       --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
@@ -667,118 +667,6 @@ PY
   info "Local embeddings configured (embeddinggemma-300m — will auto-download on first use)"
 }
 
-# ---------------------------------------------------------------------------
-# Seed workspace files if missing (fixes known bug #16457 where BOOTSTRAP.md
-# is not created on fresh installs).
-# ---------------------------------------------------------------------------
-seed_workspace() {
-  local ws_dir="$HOME/.openclaw/workspace"
-  mkdir -p "$ws_dir/memory" "$ws_dir/skills"
-
-  # BOOTSTRAP.md — the hatching script. Only written if workspace is brand new.
-  if [[ ! -f "$ws_dir/BOOTSTRAP.md" ]]; then
-    info "Seeding BOOTSTRAP.md (first-run hatching script)"
-    cat > "$ws_dir/BOOTSTRAP.md" <<'BOOTSTRAP'
-# Bootstrap
-
-Welcome to your first conversation! Let's get you set up.
-
-Please walk me through the following, **one question at a time**:
-
-1. **What should I call you?** (your name or preferred alias)
-2. **What's your timezone?** (e.g., US/Eastern, Europe/London, Asia/Tokyo)
-3. **What kind of work will we be doing together?** (e.g., coding, research, writing, DevOps)
-4. **Any preferences for how I communicate?** (e.g., concise vs. detailed, formal vs. casual)
-
-After we finish:
-- Save my answers to `USER.md`
-- Open `SOUL.md` and ask me if I'd like to customize your personality
-- Create `IDENTITY.md` with a name I choose for you
-
-When everything is set up, **delete this file** — you don't need a bootstrap script anymore. You're you now. Good luck out there.
-BOOTSTRAP
-  fi
-
-  # SOUL.md — agent personality
-  if [[ ! -f "$ws_dir/SOUL.md" ]]; then
-    info "Seeding SOUL.md"
-    cat > "$ws_dir/SOUL.md" <<'SOUL'
-# Soul
-
-You are a helpful, knowledgeable AI assistant. You are direct, honest, and efficient.
-
-## Communication style
-- Be concise but thorough
-- Lead with the answer, then explain if needed
-- Ask clarifying questions when requirements are ambiguous
-
-## Values
-- Accuracy over speed
-- Security-conscious by default
-- Respect the user's time and preferences
-SOUL
-  fi
-
-  # AGENTS.md — operating instructions
-  if [[ ! -f "$ws_dir/AGENTS.md" ]]; then
-    info "Seeding AGENTS.md"
-    cat > "$ws_dir/AGENTS.md" <<'AGENTS'
-# Agents
-
-## Operating Instructions
-- Always read files before modifying them
-- Prefer editing existing files over creating new ones
-- Run tests after making changes when a test suite exists
-- Ask before taking destructive or irreversible actions
-AGENTS
-  fi
-
-  # USER.md — filled in during hatching
-  if [[ ! -f "$ws_dir/USER.md" ]]; then
-    info "Seeding USER.md"
-    cat > "$ws_dir/USER.md" <<'USER'
-# User
-
-<!-- This file will be filled in during your first conversation (hatching). -->
-USER
-  fi
-
-  # IDENTITY.md — filled in during hatching
-  if [[ ! -f "$ws_dir/IDENTITY.md" ]]; then
-    info "Seeding IDENTITY.md"
-    cat > "$ws_dir/IDENTITY.md" <<'IDENTITY'
-# Identity
-
-<!-- This file will be filled in during your first conversation (hatching). -->
-IDENTITY
-  fi
-
-  # MEMORY.md — long-term memory
-  if [[ ! -f "$ws_dir/MEMORY.md" ]]; then
-    info "Seeding MEMORY.md"
-    cat > "$ws_dir/MEMORY.md" <<'MEMORY'
-# Memory
-
-<!-- The agent will add notes here as it learns about you and your projects. -->
-MEMORY
-  fi
-
-  # TOOLS.md — environment notes
-  if [[ ! -f "$ws_dir/TOOLS.md" ]]; then
-    info "Seeding TOOLS.md"
-    cat > "$ws_dir/TOOLS.md" <<'TOOLS'
-# Tools
-
-## Environment
-- Platform: WSL2 (Ubuntu) on Windows
-- LLM Backend: LM Studio (local, OpenAI-compatible API)
-- Browser: Google Chrome (WSL2, CDP on port 9222)
-TOOLS
-  fi
-
-  info "Workspace seeded at ${ws_dir}"
-}
-
 print_summary() {
   printf '\n'
   info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
@@ -789,108 +677,6 @@ print_summary() {
   printf '  Agent concurrency  : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
   printf '  Subagent conc.     : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
   printf '\n'
-}
-
-# ---------------------------------------------------------------------------
-# Start the OpenClaw gateway and open the dashboard in Chrome inside WSL2.
-# ---------------------------------------------------------------------------
-launch_openclaw() {
-  print_summary
-
-  if (( DAEMON_INSTALLED )); then
-    info "Gateway daemon is installed — ensuring it is running"
-    openclaw gateway start 2>/dev/null || true
-  else
-    info "Starting OpenClaw gateway in the background"
-    nohup openclaw gateway run \
-      --port "$OPENCLAW_AMD_GATEWAY_PORT" \
-      --bind "$OPENCLAW_AMD_GATEWAY_BIND" \
-      >/tmp/openclaw-gateway.log 2>&1 &
-    disown
-  fi
-
-  # Wait for gateway to be fully ready
-  local gw_ready=0
-  local gw_attempts=0
-  while (( gw_attempts < 20 )); do
-    if curl -fsS --max-time 1 \
-         "http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/" >/dev/null 2>&1; then
-      gw_ready=1
-      break
-    fi
-    sleep 0.5
-    (( gw_attempts++ )) || true
-  done
-  if (( ! gw_ready )); then
-    warn "Gateway may not be fully ready; dashboard might take a moment to load."
-  fi
-
-  # Get the dashboard URL (includes access token)
-  local dashboard_url=""
-  local dashboard_output
-  dashboard_output="$(openclaw dashboard --no-open 2>&1 || true)"
-  dashboard_url="$(printf '%s' "$dashboard_output" | grep -oP 'https?://\S+' | head -1 || true)"
-
-  # If openclaw dashboard didn't return a URL, try to extract the token from config
-  if [[ -z "$dashboard_url" ]] && [[ -f "$OPENCLAW_CONFIG_FILE" ]]; then
-    local gw_token
-    gw_token="$(python3 -c "
-import json, sys
-from pathlib import Path
-try:
-    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-    token = cfg.get('gateway', {}).get('auth', {}).get('token', '')
-    if token:
-        print(token)
-except Exception:
-    pass
-" "$OPENCLAW_CONFIG_FILE" 2>/dev/null || true)"
-    if [[ -n "$gw_token" ]]; then
-      dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/#token=${gw_token}"
-    fi
-  fi
-
-  if [[ -z "$dashboard_url" ]]; then
-    dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
-    warn "Could not retrieve dashboard token. You may need to authenticate manually."
-  fi
-  info "Dashboard: ${dashboard_url}"
-
-  # Open dashboard in Chrome inside WSL2
-  local chrome_bin=""
-  if have google-chrome-stable; then
-    chrome_bin="google-chrome-stable"
-  elif have google-chrome; then
-    chrome_bin="google-chrome"
-  elif have chromium-browser; then
-    chrome_bin="chromium-browser"
-  elif have chromium; then
-    chrome_bin="chromium"
-  fi
-
-  local chrome_debug_port=9222
-  local chrome_user_data="$HOME/.openclaw/browser/chrome-profile"
-  mkdir -p "$chrome_user_data"
-
-  if [[ -n "$chrome_bin" ]]; then
-    info "Launching Chrome with remote debugging (port ${chrome_debug_port}) for OpenClaw browser control"
-    nohup "$chrome_bin" \
-      --no-first-run \
-      --no-default-browser-check \
-      --remote-debugging-port="$chrome_debug_port" \
-      --remote-allow-origins="*" \
-      --user-data-dir="$chrome_user_data" \
-      "$dashboard_url" >/dev/null 2>&1 &
-    disown
-    info "Chrome running with CDP on port ${chrome_debug_port}"
-  else
-    warn "Chrome not found in WSL2. Open the dashboard manually:"
-    info "  $dashboard_url"
-  fi
-
-  info "Gateway is running in the background."
-  info "To check status:  openclaw gateway status"
-  info "To stop gateway:  openclaw gateway stop"
 }
 
 main() {
@@ -950,7 +736,12 @@ main() {
   fi
 
   auto_tune_config
-  seed_workspace
+
+  # Ensure DISPLAY is set for WSLg's X server (needed for Chrome in WSL2)
+  if [[ -z "$DISPLAY" ]] && [[ -S /tmp/.X11-unix/X0 ]]; then
+    export DISPLAY=:0
+    info "Set DISPLAY=:0 (WSLg X server detected)"
+  fi
 
   # Interactive onboard pass — lets the user configure hooks, skills, channels
   # The non-interactive pass above already set up provider/model/gateway,
