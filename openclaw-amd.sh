@@ -30,11 +30,6 @@ LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
 
 print_banner() {
-  printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░░█░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
   printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
   printf '\n'
 }
@@ -182,13 +177,63 @@ refresh_lms_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Select the Vulkan llama.cpp runtime in llmster.
-# In WSL2 on AMD APUs, ROCm GPU compute passthrough is broken at the driver
-# level (gfx1151 / Ryzen AI Max — open AMD bug). The Vulkan backend works
-# via the WSL2 graphics subsystem and provides real GPU acceleration.
+# AMD GPU setup for WSL2.
+# Loads the amdgpu kernel module (included in Microsoft's WSL2 kernel) to
+# create /dev/dri/ render nodes, which RADV (Mesa Radeon Vulkan) needs to
+# enumerate the GPU. Falls back to amdgpu-install if modprobe alone is not
+# sufficient.
+# ---------------------------------------------------------------------------
+install_amdgpu_wsl2() {
+  is_wsl || return 0
+
+  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
+    info "AMD GPU DRI render nodes already present"
+    return 0
+  fi
+
+  info "Loading amdgpu kernel module"
+  run_root modprobe amdgpu 2>/dev/null || true
+  printf 'amdgpu\n' | run_root tee /etc/modules-load.d/amdgpu.conf >/dev/null
+  sleep 2
+
+  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
+    info "AMD GPU DRI render nodes created"
+    return 0
+  fi
+
+  info "Adding AMD GPU repository and installing graphics driver"
+  local repo_base="https://repo.radeon.com/amdgpu-install/6.3.3/ubuntu/noble"
+  local deb="amdgpu-install_6.3.60303-1_all.deb"
+  if ! have amdgpu-install; then
+    wget -qO "/tmp/${deb}" "${repo_base}/${deb}" \
+      || { warn "Could not fetch amdgpu-install — GPU acceleration may not be available"; return 0; }
+    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "/tmp/${deb}"
+  fi
+  run_root amdgpu-install -y --usecase=graphics --no-dkms --accept-eula
+  run_root udevadm trigger --subsystem-match=drm 2>/dev/null || true
+  sleep 2
+
+  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
+    info "AMD GPU DRI render nodes created"
+  else
+    warn "AMD GPU DRI nodes not found after install — GPU acceleration may not be available"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Select the Vulkan llama.cpp runtime in llmster and prefer the RADV ICD.
 # ---------------------------------------------------------------------------
 ensure_lms_vulkan_runtime() {
   info "Selecting Vulkan runtime in llmster"
+
+  # Prefer the Mesa RADV driver for AMD GPU Vulkan acceleration.
+  local radv_icd="/usr/share/vulkan/icd.d/radeon_icd.json"
+  if [[ -f "$radv_icd" ]]; then
+    export AMD_VULKAN_ICD=RADV
+    append_line_if_missing "$HOME/.profile" 'export AMD_VULKAN_ICD=RADV'
+    append_line_if_missing "$HOME/.bashrc"  'export AMD_VULKAN_ICD=RADV'
+    info "RADV ICD preferred for Vulkan"
+  fi
 
   # Discover the installed Vulkan runtime name (version-agnostic)
   local vulkan_runtime
@@ -800,6 +845,7 @@ main() {
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
+  install_amdgpu_wsl2
 
   install_homebrew_if_missing
   install_chrome_if_missing
