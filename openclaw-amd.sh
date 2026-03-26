@@ -813,40 +813,19 @@ main() {
 
   # Risk acknowledgement — shown first, before any installs or changes
   printf '\n'
-  warn "================================================================"
-  warn "  IMPORTANT — PLEASE READ BEFORE CONTINUING"
-  warn "================================================================"
+  printf '\033[1;33m================================================================\033[0m\n'
+  printf '\033[1;33m  IMPORTANT — PLEASE READ BEFORE CONTINUING\033[0m\n'
+  printf '\033[1;33m================================================================\033[0m\n'
   printf '\n'
-  warn "OpenClaw is a highly autonomous AI agent. Giving any AI agent"
-  warn "access to any system may result in the AI acting in unpredictable"
-  warn "ways with unpredictable/unforeseen outcomes. Use of any AMD"
-  warn "suggested implementations is made at your own risk. AMD makes no"
-  warn "representations/warranties with your use of an AI agent as"
-  warn "described herein. Failure to exercise appropriate caution may"
-  warn "result in damages (foreseen and/or unforeseen)."
+  printf '\033[1;33mOpenClaw is a highly autonomous AI agent. Giving any AI agent\033[0m\n'
+  printf '\033[1;33maccess to any system may result in the AI acting in unpredictable\033[0m\n'
+  printf '\033[1;33mways with unpredictable/unforeseen outcomes. Use of any AMD\033[0m\n'
+  printf '\033[1;33msuggested implementations is made at your own risk. AMD makes no\033[0m\n'
+  printf '\033[1;33mrepresentations/warranties with your use of an AI agent as\033[0m\n'
+  printf '\033[1;33mdescribed herein. Failure to exercise appropriate caution may\033[0m\n'
+  printf '\033[1;33mresult in damages (foreseen and/or unforeseen).\033[0m\n'
   printf '\n'
-  warn "To help protect from any such damages, we expressly recommend"
-  warn "the use of the following precautions PRIOR to use of any AI"
-  warn "agent of this nature:"
-  printf '\n'
-  warn "  1. Run the AI agent on a separate, clean PC that has no"
-  warn "     personal data, or within a virtual machine. Only ever"
-  warn "     copy specific data you want the agent to access."
-  printf '\n'
-  warn "  2. Strictly avoid granting access to any of your personal"
-  warn "     or primary accounts. Instead, create dedicated accounts"
-  warn "     for the agent and provide only the specific information"
-  warn "     or permissions required for these separate accounts."
-  printf '\n'
-  warn "  3. Carefully review and limit which skills or extensions"
-  warn "     are enabled for the agent."
-  printf '\n'
-  warn "  4. Ensure that any interfaces used to access your agentic"
-  warn "     assistant (such as the web UI or messaging integrations)"
-  warn "     are protected and not accessible without authorization"
-  warn "     over local networks or the internet."
-  printf '\n'
-  warn "================================================================"
+  printf '\033[1;33m================================================================\033[0m\n'
   printf '\n'
   local accept=""
   read -r -p "Do you accept the risk and wish to continue? [y/N]: " accept < /dev/tty
@@ -907,7 +886,7 @@ main() {
   # channels. Skips auth (already configured) and hatch (we do that in a 3rd pass).
   info "Launching interactive onboard for gateway, hooks, skills, and channels..."
   printf '\n'
-  openclaw onboard --skip-auth-choice --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
+  openclaw onboard --auth-choice skip --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
   printf '\n'
 
   # Write browser environment info to TOOLS.md so the agent knows how to use Chrome
@@ -926,7 +905,7 @@ main() {
   info "Launching hatching..."
   printf '\n'
   openclaw onboard \
-    --skip-auth-choice \
+    --auth-choice skip \
     --accept-risk \
     --skip-hooks \
     --skip-search \
