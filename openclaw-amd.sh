@@ -230,7 +230,7 @@ resolve_lmstudio_url() {
   warn "Ensure 'Serve on Local Network' is enabled in LM Studio settings."
   warn "Ensure Windows Firewall allows inbound connections on port ${LMSTUDIO_PORT}."
   printf '\n'
-  read -r -p "Enter the LM Studio host IP (e.g. 192.168.0.218): " user_ip
+  read -r -p "Enter the LM Studio host IP (e.g. 192.168.0.218): " user_ip < /dev/tty
   user_ip="${user_ip// /}"
   if [[ -z "$user_ip" ]]; then
     die "No IP provided. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.0.218:${LMSTUDIO_PORT}/v1)."
@@ -265,6 +265,89 @@ wait_for_lmstudio() {
 # ---------------------------------------------------------------------------
 # Dynamic model selection from LM Studio
 # ---------------------------------------------------------------------------
+
+# Interactive arrow-key menu.  Reads from /dev/tty so it works even when
+# the script itself is piped in via  curl … | bash.
+#
+# Usage:  pick_from_menu RESULT_VAR "Prompt text" item1 item2 …
+pick_from_menu() {
+  local _result_var="$1"; shift
+  local _prompt="$1"; shift
+  local -a _items=("$@")
+  local _count=${#_items[@]}
+  local _cur=0
+
+  # Save terminal state and switch to raw mode on /dev/tty
+  local _old_stty
+  _old_stty="$(stty -g < /dev/tty 2>/dev/null)"
+  stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null
+
+  # Hide cursor
+  printf '\033[?25l' > /dev/tty
+
+  _draw_menu() {
+    # Move cursor to start of menu area and redraw
+    local i
+    for i in "${!_items[@]}"; do
+      printf '\r\033[2K' > /dev/tty
+      if (( i == _cur )); then
+        printf '  \033[1;7;36m > %s \033[0m\n' "${_items[$i]}" > /dev/tty
+      else
+        printf '  \033[0;90m   %s\033[0m\n' "${_items[$i]}" > /dev/tty
+      fi
+    done
+    printf '\r\033[2K\033[0;33m  ↑↓ move  ⏎ select\033[0m' > /dev/tty
+    # Move cursor back up to top of menu + hint line
+    printf '\033[%dA' "$(( _count ))" > /dev/tty
+  }
+
+  printf '\n' > /dev/tty
+  printf '\033[1;34m[INFO]\033[0m %s\n\n' "$_prompt" > /dev/tty
+  _draw_menu
+
+  local _key
+  while true; do
+    # Read one byte from /dev/tty
+    IFS= read -r -n1 _key < /dev/tty 2>/dev/null || true
+
+    if [[ "$_key" == $'\x1b' ]]; then
+      # Escape sequence — read two more bytes for arrow keys
+      local _seq1 _seq2
+      IFS= read -r -n1 -t 0.1 _seq1 < /dev/tty 2>/dev/null || true
+      IFS= read -r -n1 -t 0.1 _seq2 < /dev/tty 2>/dev/null || true
+      if [[ "$_seq1" == "[" ]]; then
+        case "$_seq2" in
+          A) # Up arrow
+            (( _cur > 0 )) && (( _cur-- ))
+            _draw_menu
+            ;;
+          B) # Down arrow
+            (( _cur < _count - 1 )) && (( _cur++ )) || true
+            _draw_menu
+            ;;
+        esac
+      fi
+    elif [[ "$_key" == "" || "$_key" == $'\n' ]]; then
+      # Enter pressed — accept selection
+      break
+    elif [[ "$_key" == "k" ]]; then
+      (( _cur > 0 )) && (( _cur-- ))
+      _draw_menu
+    elif [[ "$_key" == "j" ]]; then
+      (( _cur < _count - 1 )) && (( _cur++ )) || true
+      _draw_menu
+    fi
+  done
+
+  # Move past the menu and hint line, show cursor, restore terminal
+  printf '\033[%dB' "$(( _count ))" > /dev/tty
+  printf '\r\033[2K\n' > /dev/tty
+  printf '\033[?25h' > /dev/tty
+  stty "$_old_stty" < /dev/tty 2>/dev/null || true
+
+  eval "$_result_var=\${_items[\$_cur]}"
+}
+
 select_lmstudio_model() {
   # If model already set by env var, skip selection
   if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
@@ -277,7 +360,7 @@ select_lmstudio_model() {
   response="$(curl -fsS --max-time 5 "$models_url")" \
     || die "Failed to query models from LM Studio at ${models_url}"
 
-  # Parse model IDs into a newline-separated list
+  # Parse model IDs, filter out embedding models
   local model_list
   model_list="$(printf '%s' "$response" | python3 -c "
 import json, sys
@@ -286,7 +369,10 @@ models = data.get('data', [])
 if not models:
     sys.exit(1)
 for m in models:
-    print(m['id'])
+    mid = m.get('id', '')
+    if 'embed' in mid.lower():
+        continue
+    print(mid)
 " 2>/dev/null)" || die "No models loaded in LM Studio. Load a model in LM Studio and rerun."
 
   # Read into array
@@ -305,26 +391,8 @@ for m in models:
     return 0
   fi
 
-  # Multiple models — present a menu
-  printf '\n'
-  info "Multiple models detected in LM Studio:"
-  printf '\n'
-  local i
-  for i in "${!models[@]}"; do
-    printf '  \033[1;36m%d\033[0m. %s\n' "$(( i + 1 ))" "${models[$i]}"
-  done
-  printf '\n'
-
-  local choice
-  while true; do
-    read -r -p "Select a model [1-${#models[@]}]: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#models[@]} )); then
-      OPENCLAW_AMD_MODEL_ID="${models[$(( choice - 1 ))]}"
-      break
-    fi
-    warn "Invalid selection. Enter a number between 1 and ${#models[@]}."
-  done
-
+  # Multiple models — interactive arrow-key picker
+  pick_from_menu OPENCLAW_AMD_MODEL_ID "Select a model from LM Studio:" "${models[@]}"
   info "Selected model: ${OPENCLAW_AMD_MODEL_ID}"
 }
 
