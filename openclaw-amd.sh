@@ -451,6 +451,7 @@ install_or_update_openclaw() {
       npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
     fi
   fi
+  persist_openclaw_path
 }
 
 refresh_openclaw_path() {
@@ -462,7 +463,50 @@ refresh_openclaw_path() {
       export PATH="$npm_prefix/bin:$npm_prefix:$PATH"
     fi
   fi
+  # Also check common Node.js version-manager paths (nvm, fnm, volta)
+  for candidate_dir in \
+    "$HOME/.nvm/versions/node"/*/bin \
+    "$HOME/.local/share/fnm/node-versions"/*/installation/bin \
+    "$HOME/.volta/bin"; do
+    if [[ -d "$candidate_dir" ]]; then
+      export PATH="$candidate_dir:$PATH"
+    fi
+  done
   hash -r 2>/dev/null || true
+}
+
+persist_openclaw_path() {
+  refresh_openclaw_path
+  local openclaw_bin
+  openclaw_bin="$(command -v openclaw 2>/dev/null || true)"
+  if [[ -z "$openclaw_bin" ]]; then
+    # Search common install locations
+    for search_dir in \
+      "$HOME/.local/bin" \
+      "$HOME/.npm-global/bin" \
+      "$HOME/.nvm/versions/node"/*/bin \
+      "$HOME/.local/share/fnm/node-versions"/*/installation/bin \
+      "$HOME/.volta/bin" \
+      /usr/local/bin; do
+      if [[ -x "$search_dir/openclaw" ]]; then
+        openclaw_bin="$search_dir/openclaw"
+        break
+      fi
+    done
+  fi
+  if [[ -n "$openclaw_bin" ]]; then
+    local bin_dir
+    bin_dir="$(dirname "$openclaw_bin")"
+    info "Found openclaw at $openclaw_bin"
+    local path_line="export PATH=\"${bin_dir}:\$PATH\""
+    append_line_if_missing "$HOME/.profile" "$path_line"
+    append_line_if_missing "$HOME/.bashrc" "$path_line"
+    if [[ -f "$HOME/.zshrc" ]]; then
+      append_line_if_missing "$HOME/.zshrc" "$path_line"
+    fi
+    export PATH="$bin_dir:$PATH"
+    hash -r 2>/dev/null || true
+  fi
 }
 
 require_openclaw() {
@@ -832,7 +876,7 @@ main() {
   fi
 
   # Interactive onboard pass — lets the user configure gateway, hooks, skills,
-  # channels. Skips auth (already configured) and hatch (we launch Chrome instead).
+  # channels. Skips auth (already configured) and hatch (we do that in a 3rd pass).
   info "Launching interactive onboard for gateway, hooks, skills, and channels..."
   printf '\n'
   openclaw onboard --auth-choice skip --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
@@ -845,12 +889,19 @@ main() {
   info "Building memory search index..."
   openclaw memory index 2>&1 || warn "Memory indexing failed. You can run it later with: openclaw memory index"
 
-  # Launch Chrome with CDP and open the dashboard — first message triggers hatching
-  launch_chrome_dashboard
-
   print_summary
-  info "Setup complete. OpenClaw is ready."
-  info "Your first message in the dashboard will begin the hatching process."
+
+  # Final onboard pass — skip everything except the hatch (UI launch).
+  # This preserves the original hatching experience.
+  info "Launching hatching..."
+  printf '\n'
+  openclaw onboard \
+    --auth-choice skip \
+    --skip-skills \
+    --skip-channels \
+    --skip-daemon \
+    --skip-health \
+    < /dev/tty || warn "Hatching exited with an error. You can launch it later with: openclaw onboard"
 }
 
 main "$@"
