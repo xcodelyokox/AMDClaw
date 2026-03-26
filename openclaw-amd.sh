@@ -2,12 +2,10 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="openclaw-amd"
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.4.0"
 
 OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
-OPENCLAW_AMD_PROVIDER_ID="${OPENCLAW_AMD_PROVIDER_ID:-lmstudio}"
-OPENCLAW_AMD_COMPAT="${OPENCLAW_AMD_COMPAT:-openai}"
-OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-nvidia/nemotron-3-nano-4b}"
+OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-minimax-m2.5:cloud}"
 OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
 OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-64000}"
 OPENCLAW_AMD_MAX_AGENTS="${OPENCLAW_AMD_MAX_AGENTS:-2}"
@@ -15,18 +13,16 @@ OPENCLAW_AMD_MAX_SUBAGENTS="${OPENCLAW_AMD_MAX_SUBAGENTS:-2}"
 OPENCLAW_AMD_GATEWAY_PORT="${OPENCLAW_AMD_GATEWAY_PORT:-18789}"
 OPENCLAW_AMD_GATEWAY_BIND="${OPENCLAW_AMD_GATEWAY_BIND:-loopback}"
 OPENCLAW_AMD_SKIP_TUNING="${OPENCLAW_AMD_SKIP_TUNING:-0}"
-OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK="${OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK:-1}"
-LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY:-lmstudio}"
-LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 
+# Ollama cloud settings
+OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
+OLLAMA_CLOUD_BASE_URL="https://ollama.com/v1"
+OLLAMA_LOCAL_BASE_URL="http://127.0.0.1:11434/v1"
+OLLAMA_BIN=""
 
 SYSTEMD_READY=0
 DAEMON_INSTALLED=0
 RAN_ONBOARD=0
-LMS_BIN=""
-LMSTUDIO_ROOT="http://127.0.0.1:${LMSTUDIO_PORT}"
-LMSTUDIO_MODEL_ID_RESOLVED=""
-LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
 
 print_banner() {
@@ -35,7 +31,7 @@ print_banner() {
   printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
   printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
   printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
-  printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
+  printf '\033[1;33m  🦞  AMD Quick Start (Ollama + MiniMax M2.5)  🦞\033[0m\n'
   printf '\n'
 }
 
@@ -152,287 +148,164 @@ apt_install_if_missing() {
   fi
 }
 
-
 # ---------------------------------------------------------------------------
-# llmster / lms installation
-# Installs the headless LM Studio core (llmster) via the official installer.
-# Binary lands at ~/.lmstudio/bin/lms and is added to PATH.
+# Ollama installation
 # ---------------------------------------------------------------------------
-install_llmster() {
-  refresh_lms_path
+install_ollama_if_missing() {
+  refresh_ollama_path
 
-  if [[ -n "$LMS_BIN" ]]; then
-    info "llmster (lms) already installed at ${LMS_BIN}"
+  if [[ -n "$OLLAMA_BIN" ]]; then
+    info "Ollama already installed at ${OLLAMA_BIN}"
     return 0
   fi
 
-  info "Installing llmster (LM Studio headless core)"
-  curl -fsSL https://lmstudio.ai/install.sh | bash
+  info "Installing Ollama"
+  curl -fsSL https://ollama.com/install.sh | sh
 
-  refresh_lms_path
-  [[ -n "$LMS_BIN" ]] || die "llmster installed, but 'lms' was not found on PATH. Open a new shell and rerun."
+  refresh_ollama_path
+  [[ -n "$OLLAMA_BIN" ]] || die "Ollama installed, but 'ollama' was not found on PATH. Open a new shell and rerun."
 }
 
-refresh_lms_path() {
-  export PATH="$HOME/.lmstudio/bin:$PATH"
+refresh_ollama_path() {
+  export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
   hash -r 2>/dev/null || true
-  if have lms; then
-    LMS_BIN="$(command -v lms)"
+  if have ollama; then
+    OLLAMA_BIN="$(command -v ollama)"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# WSL2 AMD GPU setup via ROCm + librocdxg.
-# In WSL2 the GPU is exposed through /dev/dxg (DirectX paravirtualization).
-# librocdxg bridges /dev/dxg into the ROCm HSA runtime so llmster's ROCm
-# backend can reach the GPU without needing /dev/dri/ render nodes.
-# ---------------------------------------------------------------------------
-install_rocm_wsl2() {
-  is_wsl || return 0
-
-  # Persist HSA env vars so future shells and the llmster daemon pick them up.
-  append_line_if_missing "$HOME/.profile" 'export HSA_ENABLE_DXG_DETECTION=1'
-  append_line_if_missing "$HOME/.bashrc"  'export HSA_ENABLE_DXG_DETECTION=1'
-  append_line_if_missing "$HOME/.profile" 'export HSA_OVERRIDE_GFX_VERSION=11.5.1'
-  append_line_if_missing "$HOME/.bashrc"  'export HSA_OVERRIDE_GFX_VERSION=11.5.1'
-  export HSA_ENABLE_DXG_DETECTION=1
-  export HSA_OVERRIDE_GFX_VERSION=11.5.1
-
-  # Tip: set memory=96GB in %USERPROFILE%\.wslconfig on Windows so the full
-  # UMA VRAM pool is visible to the ROCm runtime.
-
-  if have rocminfo && rocminfo 2>&1 | grep -qiE 'gfx1151|Load librocdxg'; then
-    info "ROCm already installed and GPU detected — skipping install"
-    return 0
-  fi
-
-  info "Installing ROCm for WSL2 (usecase=wsl,rocm, no DKMS)"
-  local repo_base="https://repo.radeon.com/amdgpu-install/7.2/ubuntu/noble"
-  local deb="amdgpu-install_7.2.70200-1_all.deb"
-  if ! have amdgpu-install; then
-    wget -qO "/tmp/${deb}" "${repo_base}/${deb}" \
-      || { warn "Could not fetch amdgpu-install — GPU acceleration may not be available"; return 0; }
-    DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "/tmp/${deb}"
-  fi
-  run_root amdgpu-install -y --usecase=wsl,rocm --no-dkms --accept-eula \
-    || { warn "amdgpu-install failed — GPU acceleration may not be available"; return 0; }
-
-  # Install librocdxg — the WSL2 DXG bridge that lets ROCm use /dev/dxg.
-  info "Installing librocdxg (ROCm WSL2 /dev/dxg bridge)"
-  local librocdxg_url
-  librocdxg_url="$(curl -fsS https://api.github.com/repos/ROCm/librocdxg/releases/latest \
-    | python3 -c "
-import json, sys
-assets = json.load(sys.stdin).get('assets', [])
-for a in assets:
-    if a['name'].endswith('_amd64.deb'):
-        print(a['browser_download_url'])
-        break
-" 2>/dev/null || true)"
-  if [[ -n "$librocdxg_url" ]]; then
-    wget -qO /tmp/librocdxg.deb "$librocdxg_url" \
-      && DEBIAN_FRONTEND=noninteractive run_root dpkg -i /tmp/librocdxg.deb \
-      || warn "librocdxg install failed — GPU may not be visible to ROCm"
-  else
-    warn "Could not resolve librocdxg release URL — GPU may not be visible to ROCm"
-  fi
-
-  run_root usermod -a -G render,video "$USER" 2>/dev/null || true
-
-  info "Testing ROCm GPU detection (needs wsl --shutdown + restart if this fails)"
-  if rocminfo 2>&1 | grep -qiE 'gfx1151|Load librocdxg'; then
-    info "ROCm GPU detected successfully"
-  else
-    warn "ROCm GPU not detected — run 'wsl --shutdown' from PowerShell, reopen Ubuntu, and rerun"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Select the best available llmster runtime for AMD GPU acceleration.
-# Tries ROCm first (if librocdxg is installed), then Vulkan, then warns.
-# ---------------------------------------------------------------------------
-ensure_lms_gpu_runtime() {
-  lms_runtime_ls_clean() {
-    "$LMS_BIN" runtime ls 2>/dev/null \
-      | sed 's/\x1b\[[0-9;]*[mK]//g'
-  }
-
-  # Prefer the Mesa RADV ICD for any Vulkan path.
-  local radv_icd="/usr/share/vulkan/icd.d/radeon_icd.json"
-  if [[ -f "$radv_icd" ]]; then
-    export AMD_VULKAN_ICD=RADV
-    append_line_if_missing "$HOME/.profile" 'export AMD_VULKAN_ICD=RADV'
-    append_line_if_missing "$HOME/.bashrc"  'export AMD_VULKAN_ICD=RADV'
-  fi
-
-  # Try ROCm runtime first — only available if librocdxg bridged /dev/dxg.
-  local rocm_runtime
-  rocm_runtime="$(lms_runtime_ls_clean \
-    | grep -i 'rocm' \
-    | awk '{print $1}' \
-    | head -1 || true)"
-
-  if [[ -z "$rocm_runtime" ]]; then
-    "$LMS_BIN" runtime get llama.cpp-rocm 2>/dev/null \
-      || "$LMS_BIN" runtime install llama.cpp-rocm 2>/dev/null \
-      || true
-    rocm_runtime="$(lms_runtime_ls_clean \
-      | grep -i 'rocm' \
-      | awk '{print $1}' \
-      | head -1 || true)"
-  fi
-
-  if [[ -n "$rocm_runtime" ]]; then
-    info "ROCm runtime found: ${rocm_runtime}"
-    "$LMS_BIN" runtime select "$rocm_runtime" \
-      || warn "Could not activate ROCm runtime — check 'lms runtime select' output above"
-    info "ROCm runtime selected: ${rocm_runtime}"
-    return 0
-  fi
-
-  # Fall back to Vulkan runtime.
-  info "ROCm runtime not available — falling back to Vulkan runtime"
-  local vulkan_runtime
-  vulkan_runtime="$(lms_runtime_ls_clean \
-    | grep -i 'vulkan' \
-    | awk '{print $1}' \
-    | head -1 || true)"
-
-  if [[ -z "$vulkan_runtime" ]]; then
-    info "Vulkan runtime not found — attempting install"
-    "$LMS_BIN" runtime get llama.cpp-vulkan 2>/dev/null \
-      || "$LMS_BIN" runtime install llama.cpp-vulkan 2>/dev/null \
-      || true
-    vulkan_runtime="$(lms_runtime_ls_clean \
-      | grep -i 'vulkan' \
-      | awk '{print $1}' \
-      | head -1 || true)"
-  fi
-
-  if [[ -n "$vulkan_runtime" ]]; then
-    "$LMS_BIN" runtime select "$vulkan_runtime" \
-      || warn "Could not activate Vulkan runtime — check 'lms runtime select' output above"
-    info "Vulkan runtime selected: ${vulkan_runtime}"
-  else
-    warn "No GPU runtime available — llmster will use the CPU backend"
-  fi
-}
-
-# Persist ~/.lmstudio/bin in shell profiles so future shells pick it up
-persist_lms_path() {
-  local lms_path_line='export PATH="$HOME/.lmstudio/bin:$PATH"'
-  append_line_if_missing "$HOME/.profile" "$lms_path_line"
-  append_line_if_missing "$HOME/.bashrc"  "$lms_path_line"
+persist_ollama_path() {
+  local path_line='export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"'
+  append_line_if_missing "$HOME/.profile" "$path_line"
+  append_line_if_missing "$HOME/.bashrc"  "$path_line"
   if [[ -f "$HOME/.zshrc" ]]; then
-    append_line_if_missing "$HOME/.zshrc" "$lms_path_line"
+    append_line_if_missing "$HOME/.zshrc" "$path_line"
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Start the llmster daemon, load a model, and start the API server.
-# Each sub-step checks whether it is already complete before acting, so this
-# function is safe to call on a partial or fully-completed previous run.
+# Ensure Ollama API key is set for cloud models.
+# Prompts the user if not found in environment.
 # ---------------------------------------------------------------------------
-
-# Returns 0 if the model is already loaded in llmster memory.
-lms_model_is_loaded() {
-  "$LMS_BIN" ps 2>/dev/null | grep -qF "$OPENCLAW_AMD_MODEL_ID"
-}
-
-# Returns 0 if the model file is already present on disk (fully downloaded).
-lms_model_is_on_disk() {
-  "$LMS_BIN" ls 2>/dev/null | grep -qF "$OPENCLAW_AMD_MODEL_ID"
-}
-
-# Returns 0 if the API server is already responding on the expected port.
-lms_server_is_up() {
-  curl -fsS --max-time 2 \
-    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
-    "http://127.0.0.1:${LMSTUDIO_PORT}/v1/models" >/dev/null 2>&1
-}
-
-# ---------------------------------------------------------------------------
-# Load the model via the llmster REST API so we can set flash_attention and
-# mmap, which are not exposed as flags on `lms load`.
-# Falls back to the CLI if the REST endpoint is unavailable or returns an error.
-# ---------------------------------------------------------------------------
-load_model_via_api() {
-  local payload
-  payload="$(python3 -c "
-import json
-print(json.dumps({
-    'model':          '${OPENCLAW_AMD_MODEL_ID}',
-    'context_length': ${OPENCLAW_AMD_CONTEXT_TOKENS},
-    'flash_attention': True,
-}))
-")"
-  local response
-  response="$(curl -fsS --max-time 120 \
-    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "http://127.0.0.1:${LMSTUDIO_PORT}/api/v1/models/load" 2>&1)"
-  # Fail loudly if the API returns an error object
-  if printf '%s' "$response" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
+require_ollama_api_key() {
+  if [[ -n "$OLLAMA_API_KEY" ]]; then
+    info "OLLAMA_API_KEY is set"
     return 0
   fi
-  return 1
+
+  # Check if it was previously persisted in shell profiles
+  local sourced_key
+  sourced_key="$(grep -hE '^export OLLAMA_API_KEY=' \
+    "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null \
+    | head -1 | sed "s/^export OLLAMA_API_KEY=//;s/['\"]//g" || true)"
+  if [[ -n "$sourced_key" ]]; then
+    export OLLAMA_API_KEY="$sourced_key"
+    info "OLLAMA_API_KEY loaded from shell profile"
+    return 0
+  fi
+
+  warn "OLLAMA_API_KEY is not set. A free API key is required for cloud models."
+  warn "Get yours at: https://ollama.com/settings"
+  printf '\n'
+  read -r -p "Paste your Ollama API key and press Enter: " user_key
+  user_key="${user_key// /}"
+  [[ -n "$user_key" ]] || die "No API key provided. Re-run with OLLAMA_API_KEY=<key> to skip this prompt."
+  export OLLAMA_API_KEY="$user_key"
+
+  # Persist it so future shells and re-runs don't need to prompt again
+  local export_line="export OLLAMA_API_KEY='${user_key}'"
+  append_line_if_missing "$HOME/.profile" "$export_line"
+  append_line_if_missing "$HOME/.bashrc"  "$export_line"
+  if [[ -f "$HOME/.zshrc" ]]; then
+    append_line_if_missing "$HOME/.zshrc" "$export_line"
+  fi
+  info "OLLAMA_API_KEY saved to shell profiles"
 }
 
-load_model_via_cli() {
-  info "Falling back to lms load CLI (no flash_attention/mmap via this path)"
-  "$LMS_BIN" load "$OPENCLAW_AMD_MODEL_ID" \
-    --gpu max \
-    --context-length "$OPENCLAW_AMD_CONTEXT_TOKENS" \
-    --yes \
-    || die "Failed to load model '${OPENCLAW_AMD_MODEL_ID}'."
+# ---------------------------------------------------------------------------
+# Determine whether to use the Ollama cloud API or local server.
+# Cloud is used when the model tag contains ":cloud".
+# ---------------------------------------------------------------------------
+is_cloud_model() {
+  [[ "$OPENCLAW_AMD_MODEL_ID" == *":cloud" ]]
 }
 
-start_llmster_server() {
-  info "Starting llmster daemon"
-  "$LMS_BIN" daemon up 2>/dev/null || true
-
-  # Start the API server first so the REST load endpoint is available.
-  if lms_server_is_up; then
-    info "llmster API server already running on port ${LMSTUDIO_PORT}"
+get_ollama_base_url() {
+  if is_cloud_model; then
+    printf '%s\n' "$OLLAMA_CLOUD_BASE_URL"
   else
-    info "Starting llmster API server on port ${LMSTUDIO_PORT}"
-    "$LMS_BIN" server start --port "$LMSTUDIO_PORT" 2>/dev/null || true
-
-    local attempts=0
-    while (( attempts < 20 )); do
-      if lms_server_is_up; then break; fi
-      sleep 1
-      (( attempts++ )) || true
-    done
-    lms_server_is_up \
-      || die "llmster API server did not become reachable on port ${LMSTUDIO_PORT} after 20 seconds."
-  fi
-
-  if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
-    if lms_model_is_loaded; then
-      info "Model already loaded in memory: ${OPENCLAW_AMD_MODEL_ID}"
-    else
-      if ! lms_model_is_on_disk; then
-        info "Downloading model: ${OPENCLAW_AMD_MODEL_ID}"
-        "$LMS_BIN" get "$OPENCLAW_AMD_MODEL_ID" --yes \
-          || die "Failed to download model '${OPENCLAW_AMD_MODEL_ID}'. Check the model ID and your internet connection."
-      else
-        info "Model already on disk — skipping download: ${OPENCLAW_AMD_MODEL_ID}"
-      fi
-
-      info "Loading model (gpu=max, context=${OPENCLAW_AMD_CONTEXT_TOKENS}, flash_attn=on, mmap=on)"
-      load_model_via_api || load_model_via_cli
-    fi
+    printf '%s\n' "$OLLAMA_LOCAL_BASE_URL"
   fi
 }
 
-curl_json() {
-  local url="$1"
-  curl -fsS --max-time 5 --retry 1 \
-    -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
-    -H "x-api-key: ${LMSTUDIO_API_KEY}" \
-    "$url"
+get_ollama_api_key_for_provider() {
+  if is_cloud_model; then
+    printf '%s\n' "$OLLAMA_API_KEY"
+  else
+    # Local Ollama doesn't require a real key
+    printf 'ollama\n'
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Start local Ollama server (only needed for non-cloud models).
+# ---------------------------------------------------------------------------
+start_ollama_server_if_local() {
+  is_cloud_model && return 0
+
+  if curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
+    info "Ollama local server already running"
+    return 0
+  fi
+
+  info "Starting Ollama local server"
+  nohup ollama serve >/tmp/ollama-serve.log 2>&1 &
+  disown
+
+  local attempts=0
+  while (( attempts < 20 )); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+    (( attempts++ )) || true
+  done
+  curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1 \
+    || die "Ollama local server did not become reachable after 20 seconds."
+  info "Ollama local server is up"
+}
+
+# ---------------------------------------------------------------------------
+# Verify the cloud endpoint is reachable and the model is accessible.
+# ---------------------------------------------------------------------------
+verify_ollama_cloud_model() {
+  is_cloud_model || return 0
+
+  info "Verifying access to ${OPENCLAW_AMD_MODEL_ID} on Ollama cloud"
+  local model_name="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
+
+  local response
+  response="$(curl -fsS --max-time 10 \
+    -H "Authorization: Bearer ${OLLAMA_API_KEY}" \
+    "${OLLAMA_CLOUD_BASE_URL}/models" 2>/dev/null || true)"
+
+  if [[ -z "$response" ]]; then
+    warn "Could not reach Ollama cloud API at ${OLLAMA_CLOUD_BASE_URL}. Check your internet connection."
+    return 1
+  fi
+
+  if printf '%s' "$response" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+models = [m.get('id','') for m in data.get('data',[])]
+sys.exit(0 if any('$model_name' in m for m in models) else 1)
+" 2>/dev/null; then
+    info "Model ${OPENCLAW_AMD_MODEL_ID} is available on Ollama cloud"
+    return 0
+  fi
+
+  warn "Model ${model_name} was not listed. It may still be accessible — continuing."
+  return 0
 }
 
 maybe_enable_wsl_systemd() {
@@ -480,7 +353,6 @@ PY
 # ---------------------------------------------------------------------------
 # Google Chrome installation
 # Required so that `openclaw dashboard` can open a browser tab from WSL2.
-# Skipped if chrome/chromium is already present.
 # ---------------------------------------------------------------------------
 install_chrome_if_missing() {
   if have google-chrome-stable || have google-chrome || have chromium-browser || have chromium; then
@@ -491,7 +363,6 @@ install_chrome_if_missing() {
   info "Installing Google Chrome"
   apt_install_if_missing wget gnupg2
 
-  # Add the Google signing key and repo
   wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
     | run_root gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
 
@@ -503,7 +374,6 @@ install_chrome_if_missing() {
 
   have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH."
 
-  # wslu provides wslview, which correctly hands URLs off to the Windows browser
   apt_install_if_missing wslu
 
   info "Google Chrome installed"
@@ -549,154 +419,16 @@ backup_openclaw_config() {
   fi
 }
 
-# Returns 0 if openclaw.json already contains a complete entry for the current
-# provider, model, AND compat mode — so a compat change forces re-onboarding.
-is_openclaw_configured() {
-  [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 1
-  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "$OPENCLAW_AMD_PROVIDER_ID" "$LMSTUDIO_MODEL_ID_RESOLVED" "$OPENCLAW_AMD_COMPAT"
-import json, sys
-from pathlib import Path
-try:
-    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-except Exception:
-    sys.exit(1)
-provider_id = sys.argv[2]
-model_id    = sys.argv[3]
-compat      = sys.argv[4]  # "openai" or "anthropic"
-
-providers = cfg.get('models', {}).get('providers', {})
-if provider_id not in providers:
-    sys.exit(1)
-provider = providers[provider_id]
-
-models = provider.get('models', [])
-if not any(isinstance(m, dict) and m.get('id') == model_id for m in models):
-    sys.exit(1)
-
-# Check the API compat mode matches what the script expects.
-# anthropic compat sets api="anthropic-messages"; openai sets api="openai".
-expected_api = 'anthropic-messages' if compat == 'anthropic' else 'openai'
-actual_api   = provider.get('api', '')
-if actual_api != expected_api:
-    sys.exit(1)
-
-# Also require a gateway entry so a half-finished onboard is re-attempted.
-if not cfg.get('gateway'):
-    sys.exit(1)
-sys.exit(0)
-PY
-}
-
 # ---------------------------------------------------------------------------
-# Resolve model ID and context length from the local llmster API server.
+# Configure OpenClaw against Ollama (cloud or local) non-interactively.
 # ---------------------------------------------------------------------------
-resolve_lmstudio_endpoint() {
-  local payload
-
-  # Try the native LM Studio models endpoint first (richer metadata)
-  if payload="$(curl_json "http://127.0.0.1:${LMSTUDIO_PORT}/api/v1/models" 2>/dev/null)"; then
-    local resolved
-    resolved="$(python3 - <<'PY' "$payload" "$OPENCLAW_AMD_MODEL_ID"
-import json
-import sys
-payload = json.loads(sys.argv[1])
-forced = sys.argv[2].strip()
-models = payload.get('models') or []
-
-selected = None
-selected_ctx = None
-best_score = -10**9
-for model in models:
-    mtype = str(model.get('type', '')).lower()
-    if mtype != 'llm':
-        continue
-    key = model.get('key') or model.get('id') or model.get('model') or model.get('name')
-    if not key:
-        continue
-    if forced and key != forced:
-        continue
-    loaded_instances = model.get('loaded_instances') or []
-    loaded = bool(loaded_instances)
-    ctx = None
-    if loaded_instances:
-        inst = loaded_instances[0] or {}
-        cfg = inst.get('config') or {}
-        ctx = cfg.get('context_length') or cfg.get('max_context_length')
-    ctx = ctx or model.get('max_context_length') or model.get('context_length')
-    score = 0
-    if loaded:
-        score += 100
-    if isinstance(ctx, int):
-        score += min(ctx, 10_000_000)
-    if score > best_score:
-        best_score = score
-        selected = key
-        selected_ctx = ctx
-
-if not selected and forced:
-    print(f"{forced}\t")
-elif selected:
-    print(f"{selected}\t{selected_ctx or ''}")
-PY
-)"
-    if [[ -n "$resolved" ]]; then
-      LMSTUDIO_MODEL_ID_RESOLVED="${resolved%%$'\t'*}"
-      LMSTUDIO_CONTEXT_TOKENS="${resolved#*$'\t'}"
-      [[ "$LMSTUDIO_CONTEXT_TOKENS" == "$resolved" ]] && LMSTUDIO_CONTEXT_TOKENS=""
-      return 0
-    fi
-  fi
-
-  # Fall back to the OpenAI-compatible /v1/models endpoint
-  if payload="$(curl_json "http://127.0.0.1:${LMSTUDIO_PORT}/v1/models" 2>/dev/null)"; then
-    local resolved
-    resolved="$(python3 - <<'PY' "$payload" "$OPENCLAW_AMD_MODEL_ID"
-import json
-import sys
-payload = json.loads(sys.argv[1])
-forced = sys.argv[2].strip()
-items = payload.get('data') or []
-selected = None
-for item in items:
-    mid = item.get('id') or item.get('model') or item.get('name')
-    if not mid:
-        continue
-    if forced and mid != forced:
-        continue
-    if 'embedding' in str(mid).lower():
-        continue
-    selected = mid
-    break
-if not selected and forced:
-    print(forced)
-elif selected:
-    print(selected)
-PY
-)"
-    if [[ -n "$resolved" ]]; then
-      LMSTUDIO_MODEL_ID_RESOLVED="$resolved"
-      LMSTUDIO_CONTEXT_TOKENS=""
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
-provider_base_url_for_compat() {
-  local root="$1"
-  local compat="$2"
-  if [[ "$compat" == "openai" ]]; then
-    printf '%s/v1\n' "${root%/}"
-  else
-    printf '%s\n' "${root%/}"
-  fi
-}
-
 run_noninteractive_onboard() {
-  local compat="$1"
-  local base_url
-  base_url="$(provider_base_url_for_compat "$LMSTUDIO_ROOT" "$compat")"
+  local base_url="$1"
+  local api_key="$2"
+  local provider_id="ollama"
+
+  # Strip the :cloud suffix for the model ID passed to OpenClaw
+  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
 
   local cmd=(
     openclaw onboard
@@ -704,10 +436,10 @@ run_noninteractive_onboard() {
     --mode local
     --auth-choice custom-api-key
     --custom-base-url "$base_url"
-    --custom-model-id "$LMSTUDIO_MODEL_ID_RESOLVED"
-    --custom-provider-id "$OPENCLAW_AMD_PROVIDER_ID"
-    --custom-compatibility "$compat"
-    --custom-api-key "$LMSTUDIO_API_KEY"
+    --custom-model-id "$model_id"
+    --custom-provider-id "$provider_id"
+    --custom-compatibility "openai"
+    --custom-api-key "$api_key"
     --secret-input-mode plaintext
     --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
     --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
@@ -719,7 +451,7 @@ run_noninteractive_onboard() {
     cmd+=(--install-daemon --daemon-runtime node)
   fi
 
-  info "Configuring OpenClaw against llmster (${compat}-compatible API)"
+  info "Configuring OpenClaw against Ollama (${base_url})"
   if "${cmd[@]}"; then
     DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
     RAN_ONBOARD=1
@@ -734,10 +466,10 @@ run_noninteractive_onboard() {
       --mode local
       --auth-choice custom-api-key
       --custom-base-url "$base_url"
-      --custom-model-id "$LMSTUDIO_MODEL_ID_RESOLVED"
-      --custom-provider-id "$OPENCLAW_AMD_PROVIDER_ID"
-      --custom-compatibility "$compat"
-      --custom-api-key "$LMSTUDIO_API_KEY"
+      --custom-model-id "$model_id"
+      --custom-provider-id "$provider_id"
+      --custom-compatibility "openai"
+      --custom-api-key "$api_key"
       --secret-input-mode plaintext
       --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
       --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
@@ -755,16 +487,48 @@ run_noninteractive_onboard() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Check if OpenClaw is already configured for the current Ollama provider/model.
+# ---------------------------------------------------------------------------
+is_openclaw_configured() {
+  [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 1
+  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
+  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "ollama" "$model_id"
+import json, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    sys.exit(1)
+provider_id = sys.argv[2]
+model_id    = sys.argv[3]
+
+providers = cfg.get('models', {}).get('providers', {})
+if provider_id not in providers:
+    sys.exit(1)
+provider = providers[provider_id]
+
+models = provider.get('models', [])
+if not any(isinstance(m, dict) and m.get('id') == model_id for m in models):
+    sys.exit(1)
+
+if not cfg.get('gateway'):
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 auto_tune_config() {
   [[ "$OPENCLAW_AMD_SKIP_TUNING" == "1" ]] && return 0
   [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 0
 
+  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
   local context_tokens="$OPENCLAW_AMD_CONTEXT_TOKENS"
 
   python3 - <<'PY' \
     "$OPENCLAW_CONFIG_FILE" \
-    "$OPENCLAW_AMD_PROVIDER_ID" \
-    "$LMSTUDIO_MODEL_ID_RESOLVED" \
+    "ollama" \
+    "$model_id" \
     "$context_tokens" \
     "$OPENCLAW_AMD_MODEL_MAX_TOKENS" \
     "$OPENCLAW_AMD_MAX_AGENTS" \
@@ -797,7 +561,7 @@ else:
 
 default_models = defaults.setdefault('models', {})
 default_models.setdefault(model_ref, {})
-default_models[model_ref].setdefault('alias', 'amd-local')
+default_models[model_ref].setdefault('alias', 'ollama-cloud')
 
 defaults['contextTokens'] = context_tokens
 defaults['maxConcurrent'] = max_agents
@@ -824,47 +588,47 @@ entry['maxTokens'] = model_max_tokens
 config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
 PY
 
-  info "Applied RadeonClaw-default OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
+  info "Applied OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
 }
 
 print_summary() {
   printf '\n'
   info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
-  printf '  llmster endpoint  : %s\n' "$LMSTUDIO_ROOT"
-  printf '  Model             : %s\n' "$LMSTUDIO_MODEL_ID_RESOLVED"
+  if is_cloud_model; then
+    printf '  Ollama endpoint   : %s\n' "$OLLAMA_CLOUD_BASE_URL"
+  else
+    printf '  Ollama endpoint   : %s\n' "$OLLAMA_LOCAL_BASE_URL"
+  fi
+  printf '  Model             : %s\n' "$OPENCLAW_AMD_MODEL_ID"
   printf '  Context tokens    : %s\n' "$OPENCLAW_AMD_CONTEXT_TOKENS"
   printf '  Max tokens        : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
   printf '  Agent concurrency : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
   printf '  Subagent conc.    : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
   printf '\n'
-  printf 'llmster commands:\n'
-  printf '  lms status         # check daemon + server status\n'
-  printf '  lms server stop    # stop the API server\n'
-  printf '  lms daemon down    # stop the daemon\n'
+  printf 'Ollama quick-reference:\n'
+  printf '  ollama list                         # list local models\n'
+  printf '  ollama run minimax-m2.5:cloud       # chat with MiniMax M2.5 cloud\n'
+  printf '  ollama launch openclaw --model minimax-m2.5:cloud  # relaunch OpenClaw\n'
   printf '\n'
 }
 
 # ---------------------------------------------------------------------------
-# Start the OpenClaw gateway (if not already running via daemon), open the
-# dashboard in Chrome, then hatch in TUI.
+# Start the OpenClaw gateway, open the dashboard in Chrome, then hatch TUI.
 # ---------------------------------------------------------------------------
 launch_openclaw() {
   print_summary
 
-  # Ensure the gateway is running before opening the dashboard / TUI.
   if (( DAEMON_INSTALLED )); then
     info "Gateway daemon is installed — ensuring it is running"
     openclaw gateway start 2>/dev/null || true
   else
     info "Starting OpenClaw gateway in the background"
-    # Run the gateway detached so this script can continue to open the TUI.
     nohup openclaw gateway run \
       --port "$OPENCLAW_AMD_GATEWAY_PORT" \
       --bind "$OPENCLAW_AMD_GATEWAY_BIND" \
       >/tmp/openclaw-gateway.log 2>&1 &
     disown
 
-    # Give the gateway a moment to bind its port before proceeding.
     local attempts=0
     while (( attempts < 15 )); do
       if curl -fsS --max-time 1 \
@@ -894,8 +658,6 @@ launch_openclaw() {
 
   info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
   printf '\n'
-  # Reset terminal mode before handing over — prevents Enter/input being swallowed
-  # by leftover raw-mode state from earlier script output.
   stty sane 2>/dev/null || true
   exec openclaw tui
 }
@@ -906,7 +668,6 @@ main() {
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
-  install_rocm_wsl2
 
   install_homebrew_if_missing
   install_chrome_if_missing
@@ -914,49 +675,37 @@ main() {
   prepare_npm_global_prefix
   require_openclaw
 
-  # Install llmster (headless LM Studio core) and start the local API server
-  install_llmster
-  persist_lms_path
-  ensure_lms_gpu_runtime
-  start_llmster_server
+  # Install Ollama
+  install_ollama_if_missing
+  persist_ollama_path
 
-  if ! resolve_lmstudio_endpoint; then
-    warn "llmster is running, but no LLM model could be found on the API."
-    if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
-      die "Model '${OPENCLAW_AMD_MODEL_ID}' could not be loaded. Make sure it is downloaded: lms get ${OPENCLAW_AMD_MODEL_ID}"
-    else
-      die "No model is loaded. Download a model with 'lms get <model-id>' then set OPENCLAW_AMD_MODEL_ID=<model-id> and rerun."
-    fi
+  # Require API key for cloud models
+  if is_cloud_model; then
+    require_ollama_api_key
+    verify_ollama_cloud_model
+  else
+    start_ollama_server_if_local
   fi
 
-  [[ -n "$LMSTUDIO_MODEL_ID_RESOLVED" ]] || die "llmster is reachable, but no LLM model could be selected. Load a model with 'lms load <model-id>' and rerun."
+  local base_url
+  base_url="$(get_ollama_base_url)"
+  local api_key
+  api_key="$(get_ollama_api_key_for_provider)"
 
   local configured=0
   if is_openclaw_configured; then
-    info "OpenClaw already configured for ${OPENCLAW_AMD_PROVIDER_ID}/${LMSTUDIO_MODEL_ID_RESOLVED} — skipping onboard"
+    info "OpenClaw already configured for ollama/${OPENCLAW_AMD_MODEL_ID%%:cloud} — skipping onboard"
     configured=1
     RAN_ONBOARD=1
-    # Treat daemon as installed if systemd is ready; we just can't tell for sure
-    # without re-running onboard, so assume the previous run set it up correctly.
     DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
   else
     backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
-
-    local compat_attempts=("$OPENCLAW_AMD_COMPAT")
-    if [[ "$OPENCLAW_AMD_COMPAT" == "anthropic" && "$OPENCLAW_AMD_ALLOW_OPENAI_FALLBACK" == "1" ]]; then
-      compat_attempts+=("openai")
+    if run_noninteractive_onboard "$base_url" "$api_key"; then
+      configured=1
+    else
+      warn "Non-interactive onboard failed."
     fi
-
-    local compat
-    for compat in "${compat_attempts[@]}"; do
-      if run_noninteractive_onboard "$compat"; then
-        configured=1
-        break
-      fi
-      warn "OpenClaw onboarding failed for compatibility mode '${compat}'."
-    done
-
-    (( configured == 1 )) || die "OpenClaw was installed, but non-interactive onboarding against llmster failed. Try setting OPENCLAW_AMD_MODEL_ID explicitly and rerun."
+    (( configured == 1 )) || die "OpenClaw onboarding against Ollama failed. Check the output above."
   fi
 
   auto_tune_config
