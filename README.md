@@ -12,7 +12,7 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 
 ## Prerequisites
 
-[Full Guide](https://www.amd.com/en/resources/articles/run-openclaw-locally-on-amd-ryzen-ai-max-and-radeon-gpus.html)
+This AMD Quisck Start guide is intended to be used with the RyzenClaw and RadeonClaw BKCs [Full Guide](https://www.amd.com/en/resources/articles/run-openclaw-locally-on-amd-ryzen-ai-max-and-radeon-gpus.html)
 
 1. For AMD Ryzen AI Max+ users: **Variable Graphics Memory** set to 96GB
 2. **LM Studio** installed and running on Windows with at least one model loaded, context properly configured and LM Studio server running with "Serve on Local Network" setting selected. 
