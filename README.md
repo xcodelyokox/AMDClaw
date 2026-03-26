@@ -14,7 +14,7 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 
 [Full Guide](https://www.amd.com/en/resources/articles/run-openclaw-locally-on-amd-ryzen-ai-max-and-radeon-gpus.html)
 
-1. For AMD Ryzen AI Max+ userss: **Variable Graphics Memory** set to 96GB
+1. For AMD Ryzen AI Max+ users: **Variable Graphics Memory** set to 96GB
 2. **LM Studio** installed and running on Windows with at least one model loaded, context properly configured and LM Studio server running with "Serve on Local Network" setting selected. 
 2. **WSL2 with Ubuntu 24.04** — open PowerShell as Administrator and run the following:
 ```powershell
