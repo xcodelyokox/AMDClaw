@@ -893,13 +893,15 @@ main() {
 
   # Final onboard pass — skip everything except the hatch (UI launch).
   # This preserves the original hatching experience.
+  # Steps skipped: auth, web search, channels, skills, health check.
+  # Daemon is opt-in (not passed), so it's implicitly skipped.
   info "Launching hatching..."
   printf '\n'
   openclaw onboard \
     --auth-choice skip \
+    --skip-search \
     --skip-skills \
     --skip-channels \
-    --skip-daemon \
     --skip-health \
     < /dev/tty || warn "Hatching exited with an error. You can launch it later with: openclaw onboard"
 }
