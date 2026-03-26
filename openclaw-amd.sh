@@ -704,7 +704,7 @@ install_skills() {
     info "ClawHub CLI already installed"
   fi
 
-  local -a skills=(clawhub himalaya nano-pdf)
+  local -a skills=(steipete/clawdhub lamelas/himalaya steipete/nano-pdf)
   local skill
   for skill in "${skills[@]}"; do
     info "Installing skill: ${skill}"
@@ -729,6 +729,118 @@ install_skills() {
   done
 
   info "Skills and hooks configured"
+}
+
+# ---------------------------------------------------------------------------
+# Seed workspace files if missing (fixes known bug #16457 where BOOTSTRAP.md
+# is not created on fresh installs).
+# ---------------------------------------------------------------------------
+seed_workspace() {
+  local ws_dir="$HOME/.openclaw/workspace"
+  mkdir -p "$ws_dir/memory" "$ws_dir/skills"
+
+  # BOOTSTRAP.md — the hatching script. Only written if workspace is brand new.
+  if [[ ! -f "$ws_dir/BOOTSTRAP.md" ]]; then
+    info "Seeding BOOTSTRAP.md (first-run hatching script)"
+    cat > "$ws_dir/BOOTSTRAP.md" <<'BOOTSTRAP'
+# Bootstrap
+
+Welcome to your first conversation! Let's get you set up.
+
+Please walk me through the following, **one question at a time**:
+
+1. **What should I call you?** (your name or preferred alias)
+2. **What's your timezone?** (e.g., US/Eastern, Europe/London, Asia/Tokyo)
+3. **What kind of work will we be doing together?** (e.g., coding, research, writing, DevOps)
+4. **Any preferences for how I communicate?** (e.g., concise vs. detailed, formal vs. casual)
+
+After we finish:
+- Save my answers to `USER.md`
+- Open `SOUL.md` and ask me if I'd like to customize your personality
+- Create `IDENTITY.md` with a name I choose for you
+
+When everything is set up, **delete this file** — you don't need a bootstrap script anymore. You're you now. Good luck out there.
+BOOTSTRAP
+  fi
+
+  # SOUL.md — agent personality
+  if [[ ! -f "$ws_dir/SOUL.md" ]]; then
+    info "Seeding SOUL.md"
+    cat > "$ws_dir/SOUL.md" <<'SOUL'
+# Soul
+
+You are a helpful, knowledgeable AI assistant. You are direct, honest, and efficient.
+
+## Communication style
+- Be concise but thorough
+- Lead with the answer, then explain if needed
+- Ask clarifying questions when requirements are ambiguous
+
+## Values
+- Accuracy over speed
+- Security-conscious by default
+- Respect the user's time and preferences
+SOUL
+  fi
+
+  # AGENTS.md — operating instructions
+  if [[ ! -f "$ws_dir/AGENTS.md" ]]; then
+    info "Seeding AGENTS.md"
+    cat > "$ws_dir/AGENTS.md" <<'AGENTS'
+# Agents
+
+## Operating Instructions
+- Always read files before modifying them
+- Prefer editing existing files over creating new ones
+- Run tests after making changes when a test suite exists
+- Ask before taking destructive or irreversible actions
+AGENTS
+  fi
+
+  # USER.md — filled in during hatching
+  if [[ ! -f "$ws_dir/USER.md" ]]; then
+    info "Seeding USER.md"
+    cat > "$ws_dir/USER.md" <<'USER'
+# User
+
+<!-- This file will be filled in during your first conversation (hatching). -->
+USER
+  fi
+
+  # IDENTITY.md — filled in during hatching
+  if [[ ! -f "$ws_dir/IDENTITY.md" ]]; then
+    info "Seeding IDENTITY.md"
+    cat > "$ws_dir/IDENTITY.md" <<'IDENTITY'
+# Identity
+
+<!-- This file will be filled in during your first conversation (hatching). -->
+IDENTITY
+  fi
+
+  # MEMORY.md — long-term memory
+  if [[ ! -f "$ws_dir/MEMORY.md" ]]; then
+    info "Seeding MEMORY.md"
+    cat > "$ws_dir/MEMORY.md" <<'MEMORY'
+# Memory
+
+<!-- The agent will add notes here as it learns about you and your projects. -->
+MEMORY
+  fi
+
+  # TOOLS.md — environment notes
+  if [[ ! -f "$ws_dir/TOOLS.md" ]]; then
+    info "Seeding TOOLS.md"
+    cat > "$ws_dir/TOOLS.md" <<'TOOLS'
+# Tools
+
+## Environment
+- Platform: WSL2 (Ubuntu) on Windows
+- LLM Backend: LM Studio (local, OpenAI-compatible API)
+- Browser: Google Chrome (WSL2, CDP on port 9222)
+TOOLS
+  fi
+
+  info "Workspace seeded at ${ws_dir}"
 }
 
 print_summary() {
@@ -902,6 +1014,7 @@ main() {
   fi
 
   auto_tune_config
+  seed_workspace
   install_skills
   launch_openclaw
 }
