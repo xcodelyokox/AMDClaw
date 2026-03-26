@@ -19,12 +19,12 @@ SYSTEMD_READY=0
 RAN_ONBOARD=0
 
 print_banner() {
-  printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░░█░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
-  printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
-  printf '\033[1;33m  🦞  AMD Quick Start (LM Studio + OpenClaw)  🦞\033[0m\n'
+  printf '\033[1;31m░████░░█░░░█░█████░░████░█░░░█░░░░░████░░▀█▀░░████░░████░░▀█▀\033[0m\n'
+  printf '\033[1;31m█░░░█░░█░░░█░░░█░░░█░░░░░█░██░░░░░█░░░░░░█░░░█░░░█░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░█░░█░░░█░░░█░░░█░░░░░██░░░░░░░░███░░░█░░░█████░████░░░█░\033[0m\n'
+  printf '\033[1;31m█░█░█░░█░░░█░░░█░░░█░░░░░█░██░░░░░░░░░█░░█░░░█░░░█░█░░█░░░█░\033[0m\n'
+  printf '\033[1;31m░█░█░░░░███░░░█░░░░████░█░░░█░░░░░████░░░█░░░█░░░█░█░░░█░░█░\033[0m\n'
+  printf '\033[1;33m    🦞  OpenClaw on AMD (LM Studio + WSL2)  🦞\033[0m\n'
   printf '\n'
 }
 
@@ -687,13 +687,14 @@ write_tools_md() {
 
   # Only append if the file exists (created by interactive onboard) and
   # our marker isn't already present (idempotent on re-runs).
-  if [[ -f "$tools_file" ]] && ! grep -q '## Browser Control' "$tools_file" 2>/dev/null; then
+  if [[ -f "$tools_file" ]] && ! grep -q '## Chrome Browser Usage and Control' "$tools_file" 2>/dev/null; then
     info "Appending browser environment info to TOOLS.md"
     cat >> "$tools_file" <<'TOOLS_APPEND'
 
-## Browser Control
+## Chrome Browser Usage and Control
 - Chrome is running inside WSL2 with CDP on port 9222
 - DISPLAY=:0 is set for WSLg
+- If the user asks you to open a browser or visit a URL, use Chrome via the commands below
 - Use the `default` browser profile: `openclaw browser --browser-profile default`
 - Do NOT use xdg-open or wslview (those open Windows host browsers)
 - To navigate: `openclaw browser --browser-profile default navigate <url>`
@@ -711,9 +712,10 @@ TOOLS_APPEND
     cat > "$tools_file" <<'TOOLS_NEW'
 # Tools
 
-## Browser Control
+## Chrome Browser Usage and Control
 - Chrome is running inside WSL2 with CDP on port 9222
 - DISPLAY=:0 is set for WSLg
+- If the user asks you to open a browser or visit a URL, use Chrome via the commands below
 - Use the `default` browser profile: `openclaw browser --browser-profile default`
 - Do NOT use xdg-open or wslview (those open Windows host browsers)
 - To navigate: `openclaw browser --browser-profile default navigate <url>`
@@ -808,6 +810,24 @@ print_summary() {
 main() {
   print_banner
   require_linux
+
+  # Risk acknowledgement — shown first, before any installs or changes
+  printf '\n'
+  warn "============================================================"
+  warn "  IMPORTANT: OpenClaw is a highly autonomous AI agent."
+  warn "  Giving any AI agent access to your system may result in"
+  warn "  unpredictable actions with unpredictable outcomes."
+  warn "  AMD recommends running on a separate, clean PC with no"
+  warn "  personal data, or within a virtual machine."
+  warn "============================================================"
+  printf '\n'
+  local accept=""
+  read -r -p "Do you accept the risk and wish to continue? [y/N]: " accept < /dev/tty
+  if [[ ! "$accept" =~ ^[Yy] ]]; then
+    die "Risk not accepted. Exiting."
+  fi
+  printf '\n'
+
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
@@ -824,25 +844,6 @@ main() {
   install_or_update_openclaw
   prepare_npm_global_prefix
   require_openclaw
-
-  # Risk acknowledgement (shown to user before onboard)
-  if ! is_openclaw_configured; then
-    printf '\n'
-    warn "============================================================"
-    warn "  IMPORTANT: OpenClaw is a highly autonomous AI agent."
-    warn "  Giving any AI agent access to your system may result in"
-    warn "  unpredictable actions with unpredictable outcomes."
-    warn "  AMD recommends running on a separate, clean PC with no"
-    warn "  personal data, or within a virtual machine."
-    warn "============================================================"
-    printf '\n'
-    local accept=""
-    read -r -p "Do you accept the risk and wish to continue? [y/N]: " accept < /dev/tty
-    if [[ ! "$accept" =~ ^[Yy] ]]; then
-      die "Risk not accepted. Exiting."
-    fi
-    printf '\n'
-  fi
 
   # Onboard or skip if already configured
   local configured=0
