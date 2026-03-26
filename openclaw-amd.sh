@@ -431,9 +431,41 @@ install_chrome_if_missing() {
 
   have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH."
 
-  apt_install_if_missing wslu
-
   info "Google Chrome installed"
+}
+
+# ---------------------------------------------------------------------------
+# Homebrew (Linuxbrew) — needed by some OpenClaw skills
+# ---------------------------------------------------------------------------
+install_homebrew_if_missing() {
+  if have brew; then
+    info "Homebrew already installed — skipping"
+    return 0
+  fi
+
+  info "Installing Homebrew (Linuxbrew)..."
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+  # Add brew to PATH and persist to shell profiles
+  local brew_path=""
+  if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+    brew_path="/home/linuxbrew/.linuxbrew/bin/brew"
+  elif [[ -x "$HOME/.linuxbrew/bin/brew" ]]; then
+    brew_path="$HOME/.linuxbrew/bin/brew"
+  fi
+
+  if [[ -n "$brew_path" ]]; then
+    eval "$("$brew_path" shellenv)"
+    local brew_env_line="eval \"\$($brew_path shellenv)\""
+    append_line_if_missing "$HOME/.profile" "$brew_env_line"
+    append_line_if_missing "$HOME/.bashrc" "$brew_env_line"
+    if [[ -f "$HOME/.zshrc" ]]; then
+      append_line_if_missing "$HOME/.zshrc" "$brew_env_line"
+    fi
+    info "Homebrew installed and added to PATH"
+  else
+    warn "Homebrew install finished but brew binary not found at expected locations."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -836,6 +868,7 @@ main() {
 
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
+  install_homebrew_if_missing
   maybe_enable_wsl_systemd
 
   # LM Studio detection
