@@ -17,14 +17,14 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 1. For AMD Ryzen AI Max+ userss: **Variable Graphics Memory** set to 96GB
 2. **LM Studio** installed and running on Windows with at least one model loaded, context properly configured and LM Studio server running with "Serve on Local Network" setting selected. 
 2. **WSL2 with Ubuntu 24.04** — open PowerShell as Administrator and run the following:
-   ```powershell
-   wsl --install --no-distribution
-   ```
-   Restart your machine if prompted, then run:
-   ```powershell
-   wsl --install -d Ubuntu-24.04
-   ```
-   Follow the prompts to create a Unix username and password. 
+```powershell
+wsl --install --no-distribution
+```
+Restart your machine if prompted, then run:
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+Follow the prompts to create a Unix username and password. 
 
 ---
 
@@ -33,13 +33,6 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 Open your Ubuntu/WSL terminal and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
-```
-
-Or pass the LM Studio URL explicitly:
-
-```bash
-LMSTUDIO_BASE_URL=http://172.20.0.1:1234 \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 ```
 
