@@ -907,7 +907,6 @@ main() {
   openclaw onboard \
     --auth-choice skip \
     --accept-risk \
-    --skip-hooks \
     --skip-search \
     --skip-skills \
     --skip-channels \
