@@ -556,7 +556,8 @@ auto_tune_config() {
     "$context_tokens" \
     "$OPENCLAW_AMD_MODEL_MAX_TOKENS" \
     "$OPENCLAW_AMD_MAX_AGENTS" \
-    "$OPENCLAW_AMD_MAX_SUBAGENTS"
+    "$OPENCLAW_AMD_MAX_SUBAGENTS" \
+    "$LMSTUDIO_BASE_URL"
 import json
 import sys
 from pathlib import Path
@@ -568,6 +569,7 @@ context_tokens = int(sys.argv[4])
 model_max_tokens = int(sys.argv[5])
 max_agents = int(sys.argv[6])
 max_subagents = int(sys.argv[7])
+lmstudio_base_url = sys.argv[8]
 
 cfg = json.loads(config_path.read_text(encoding='utf-8'))
 agents = cfg.setdefault('agents', {})
@@ -609,12 +611,13 @@ if entry is None:
 entry['contextWindow'] = context_tokens
 entry['maxTokens'] = model_max_tokens
 
-# --- Local embeddings for Memory.md (embeddinggemma-300m via node-llama-cpp) ---
+# --- Embeddings via LM Studio's nomic-embed (OpenAI-compatible /v1/embeddings) ---
 ms = defaults.setdefault('memorySearch', {})
 ms['enabled'] = True
-ms['provider'] = 'local'
-ms.setdefault('local', {})
-ms['local']['modelPath'] = 'hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf'
+ms['provider'] = 'ollama'
+ms['model'] = 'text-embedding-nomic-embed-text-v1.5'
+ms.setdefault('ollama', {})
+ms['ollama']['baseUrl'] = lmstudio_base_url
 ms.setdefault('query', {})
 ms['query']['maxResults'] = 30
 ms['query']['minScore'] = 0.15
@@ -634,7 +637,122 @@ config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encodi
 PY
 
   info "Applied OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
-  info "Local embeddings configured (embeddinggemma-300m — will auto-download on first use)"
+  info "Embeddings configured (nomic-embed-text via LM Studio at ${LMSTUDIO_BASE_URL})"
+}
+
+# ---------------------------------------------------------------------------
+# Append browser/environment info to TOOLS.md so the agent knows its setup.
+# ---------------------------------------------------------------------------
+write_tools_md() {
+  local ws_dir="$HOME/.openclaw/workspace"
+  local tools_file="$ws_dir/TOOLS.md"
+
+  # Only append if the file exists (created by interactive onboard) and
+  # our marker isn't already present (idempotent on re-runs).
+  if [[ -f "$tools_file" ]] && ! grep -q '## Browser Control' "$tools_file" 2>/dev/null; then
+    info "Appending browser environment info to TOOLS.md"
+    cat >> "$tools_file" <<'TOOLS_APPEND'
+
+## Browser Control
+- Chrome is running inside WSL2 with CDP on port 9222
+- DISPLAY=:0 is set for WSLg
+- Use the `default` browser profile: `openclaw browser --browser-profile default`
+- Do NOT use xdg-open or wslview (those open Windows host browsers)
+- To navigate: `openclaw browser --browser-profile default navigate <url>`
+- To launch Chrome manually: `DISPLAY=:0 google-chrome-stable --remote-debugging-port=9222 --user-data-dir=$HOME/.openclaw/browser/chrome-profile`
+
+## Environment
+- Platform: WSL2 (Ubuntu) on Windows
+- LLM Backend: LM Studio (local, Anthropic-compatible API)
+- Embeddings: nomic-embed-text via LM Studio (OpenAI-compatible /v1/embeddings)
+TOOLS_APPEND
+  elif [[ ! -f "$tools_file" ]]; then
+    # Workspace wasn't created by onboard — write the file ourselves
+    mkdir -p "$ws_dir"
+    info "Creating TOOLS.md with browser environment info"
+    cat > "$tools_file" <<'TOOLS_NEW'
+# Tools
+
+## Browser Control
+- Chrome is running inside WSL2 with CDP on port 9222
+- DISPLAY=:0 is set for WSLg
+- Use the `default` browser profile: `openclaw browser --browser-profile default`
+- Do NOT use xdg-open or wslview (those open Windows host browsers)
+- To navigate: `openclaw browser --browser-profile default navigate <url>`
+- To launch Chrome manually: `DISPLAY=:0 google-chrome-stable --remote-debugging-port=9222 --user-data-dir=$HOME/.openclaw/browser/chrome-profile`
+
+## Environment
+- Platform: WSL2 (Ubuntu) on Windows
+- LLM Backend: LM Studio (local, Anthropic-compatible API)
+- Embeddings: nomic-embed-text via LM Studio (OpenAI-compatible /v1/embeddings)
+TOOLS_NEW
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Launch Chrome with CDP and open the OpenClaw dashboard.
+# ---------------------------------------------------------------------------
+launch_chrome_dashboard() {
+  local chrome_bin=""
+  if have google-chrome-stable; then
+    chrome_bin="google-chrome-stable"
+  elif have google-chrome; then
+    chrome_bin="google-chrome"
+  elif have chromium-browser; then
+    chrome_bin="chromium-browser"
+  elif have chromium; then
+    chrome_bin="chromium"
+  fi
+
+  if [[ -z "$chrome_bin" ]]; then
+    warn "Chrome not found in WSL2. Open the dashboard manually."
+    return 0
+  fi
+
+  # Get the dashboard URL (includes access token)
+  local dashboard_url=""
+  local dashboard_output
+  dashboard_output="$(openclaw dashboard --no-open 2>&1 || true)"
+  dashboard_url="$(printf '%s' "$dashboard_output" | grep -oP 'https?://\S+' | head -1 || true)"
+
+  # Fallback: extract token from config
+  if [[ -z "$dashboard_url" ]] && [[ -f "$OPENCLAW_CONFIG_FILE" ]]; then
+    local gw_token
+    gw_token="$(python3 -c "
+import json, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    token = cfg.get('gateway', {}).get('auth', {}).get('token', '')
+    if token:
+        print(token)
+except Exception:
+    pass
+" "$OPENCLAW_CONFIG_FILE" 2>/dev/null || true)"
+    if [[ -n "$gw_token" ]]; then
+      dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/#token=${gw_token}"
+    fi
+  fi
+
+  if [[ -z "$dashboard_url" ]]; then
+    dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
+    warn "Could not retrieve dashboard token. You may need to authenticate manually."
+  fi
+
+  local chrome_debug_port=9222
+  local chrome_user_data="$HOME/.openclaw/browser/chrome-profile"
+  mkdir -p "$chrome_user_data"
+
+  info "Launching Chrome with CDP (port ${chrome_debug_port}) and opening dashboard"
+  info "Dashboard: ${dashboard_url}"
+  nohup "$chrome_bin" \
+    --no-first-run \
+    --no-default-browser-check \
+    --remote-debugging-port="$chrome_debug_port" \
+    --remote-allow-origins="*" \
+    --user-data-dir="$chrome_user_data" \
+    "$dashboard_url" >/dev/null 2>&1 &
+  disown
 }
 
 print_summary() {
@@ -719,17 +837,26 @@ main() {
     info "DISPLAY=:0 set and persisted to shell profiles (WSLg X server detected)"
   fi
 
-  # Interactive onboard pass — lets the user configure hooks, skills, channels
-  # The non-interactive pass above already set up provider/model/gateway,
-  # so this second pass detects existing config and only walks through the
-  # remaining steps (hooks, skills, channels, web search).
-  info "Launching interactive onboard for hooks, skills, and channels setup..."
+  # Interactive onboard pass — lets the user configure gateway, hooks, skills,
+  # channels. Skips auth (already configured) and hatch (we launch Chrome instead).
+  info "Launching interactive onboard for gateway, hooks, skills, and channels..."
   printf '\n'
-  openclaw onboard --auth-choice skip < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
+  openclaw onboard --auth-choice skip --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
   printf '\n'
+
+  # Write browser environment info to TOOLS.md so the agent knows how to use Chrome
+  write_tools_md
+
+  # Build the memory search index (triggers embedding model connection to LM Studio)
+  info "Building memory search index..."
+  openclaw memory index 2>&1 || warn "Memory indexing failed. You can run it later with: openclaw memory index"
+
+  # Launch Chrome with CDP and open the dashboard — first message triggers hatching
+  launch_chrome_dashboard
 
   print_summary
   info "Setup complete. OpenClaw is ready."
+  info "Your first message in the dashboard will begin the hatching process."
 }
 
 main "$@"
