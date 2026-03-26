@@ -3,10 +3,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $SCRIPT_NAME     = "openclaw-amd-bootstrap"
-$SCRIPT_VERSION  = "0.1.0"
+$SCRIPT_VERSION  = "0.5.0"
 $WSL_DISTRO      = "Ubuntu-24.04"
 $RESUME_TASK     = "OpenClawAMDBootstrapResume"
 $BASH_SCRIPT_URL = "https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh"
+$LMSTUDIO_PORT   = if ($env:LMSTUDIO_PORT) { $env:LMSTUDIO_PORT } else { 1234 }
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -33,8 +34,6 @@ function Assert-Admin {
 # Returns $true if a reboot is required before continuing.
 # ---------------------------------------------------------------------------
 function Install-WSL2Feature {
-    # wsl --version is only available when the Store version of WSL is installed
-    # and the kernel is ready. Use it as the "all good" signal.
     $ver = & wsl --version 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Info "WSL2 is already installed and ready."
@@ -43,7 +42,6 @@ function Install-WSL2Feature {
 
     Write-Info "WSL2 not detected — enabling Windows features and installing WSL2 kernel..."
 
-    # Enable the two required Windows optional features
     $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
     $vmFeature  = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
 
@@ -65,13 +63,10 @@ function Install-WSL2Feature {
         return $true
     }
 
-    # Features already enabled — install/update the WSL2 kernel package from the Store
     Write-Info "Installing WSL2 kernel update..."
     & wsl --install --no-distribution 2>&1 | Write-Host
-    # wsl --install may itself signal a reboot requirement; treat any failure as needing one
     if ($LASTEXITCODE -ne 0) { return $true }
 
-    # Set WSL 2 as the default version
     & wsl --set-default-version 2 | Out-Null
 
     return $false
@@ -81,7 +76,6 @@ function Install-WSL2Feature {
 # Ubuntu 24.04 distro installation
 # ---------------------------------------------------------------------------
 function Install-UbuntuDistro {
-    # wsl --list --quiet outputs UTF-16LE; strip null bytes before matching
     $rawList = & wsl --list --quiet 2>&1
     $distroList = ($rawList | Out-String).Replace("`0", "")
 
@@ -96,11 +90,8 @@ function Install-UbuntuDistro {
         Write-Fatal "Failed to install $WSL_DISTRO. Exit code: $LASTEXITCODE"
     }
 
-    # Ensure WSL 2 is used for this distro
     & wsl --set-version $WSL_DISTRO 2 2>&1 | Out-Null
 
-    # Launch Ubuntu in a new window so the user can complete the OOBE
-    # (create a Unix username and password)
     Write-Host ""
     Write-Info "Ubuntu 24.04 has been installed."
     Write-Info "A Ubuntu terminal window will now open."
@@ -144,14 +135,124 @@ function Remove-ResumeTask {
 }
 
 # ---------------------------------------------------------------------------
-# Run the bash script inside WSL2 as the default user.
-# sudo will prompt for the user's password wherever the bash script needs it.
+# Detect LM Studio endpoint and determine the host IP for WSL2 access.
+# Returns the base URL (e.g. http://172.x.x.x:1234/v1).
+# ---------------------------------------------------------------------------
+function Find-LMStudioEndpoint {
+    # 1. Verify LM Studio API is reachable on localhost
+    Write-Info "Checking if LM Studio is running on port $LMSTUDIO_PORT..."
+    try {
+        $response = Invoke-RestMethod -Uri "http://localhost:$LMSTUDIO_PORT/v1/models" -TimeoutSec 5
+        $modelCount = 0
+        if ($response.data) { $modelCount = $response.data.Count }
+        Write-Info "LM Studio API is reachable with $modelCount model(s) loaded."
+        if ($modelCount -eq 0) {
+            Write-Warn "No models are loaded in LM Studio. Please load a model before continuing."
+            Read-Host "Press Enter after loading a model in LM Studio"
+            $response = Invoke-RestMethod -Uri "http://localhost:$LMSTUDIO_PORT/v1/models" -TimeoutSec 5
+            if (-not $response.data -or $response.data.Count -eq 0) {
+                Write-Fatal "Still no models loaded in LM Studio. Load a model and rerun."
+            }
+        }
+    } catch {
+        Write-Fatal "LM Studio is not reachable at http://localhost:$LMSTUDIO_PORT/v1/models. Please start LM Studio, load a model, ensure 'Serve on Local Network' is enabled, and rerun this script."
+    }
+
+    # 2. Determine Windows host IP that WSL2 can reach
+    $hostIP = $null
+
+    # Try the vEthernet (WSL) adapter first
+    $wslAdapter = Get-NetIPAddress -InterfaceAlias "vEthernet (WSL)*" -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+    if ($wslAdapter) {
+        $hostIP = $wslAdapter.IPAddress
+        Write-Info "Found WSL virtual adapter IP: $hostIP"
+    }
+
+    # Fallback: first non-loopback IPv4
+    if (-not $hostIP) {
+        $fallback = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
+                    Select-Object -First 1
+        if ($fallback) {
+            $hostIP = $fallback.IPAddress
+            Write-Info "Using fallback IP: $hostIP"
+        }
+    }
+
+    if (-not $hostIP) {
+        Write-Fatal "Could not determine a host IP for WSL2 to reach LM Studio. Set LMSTUDIO_BASE_URL manually."
+    }
+
+    $baseUrl = "http://${hostIP}:${LMSTUDIO_PORT}"
+
+    # 3. Test connectivity from WSL2
+    Write-Info "Testing LM Studio connectivity from WSL2..."
+    $testResult = & wsl -d $WSL_DISTRO -- bash -c "curl -fsS --max-time 5 '$baseUrl/v1/models' >/dev/null 2>&1 && echo OK || echo FAIL" 2>&1
+    $testStr = ($testResult | Out-String).Trim()
+
+    if ($testStr -ne "OK") {
+        Write-Warn "LM Studio is not reachable from WSL2 at $baseUrl"
+        Write-Warn "This is usually caused by Windows Firewall blocking inbound connections on port $LMSTUDIO_PORT."
+        Write-Host ""
+        $answer = Read-Host "Add a firewall rule to allow port $LMSTUDIO_PORT? [Y/n]"
+        if ($answer -notmatch '^[Nn]') {
+            New-NetFirewallRule `
+                -DisplayName "LM Studio API (WSL2)" `
+                -Direction Inbound `
+                -LocalPort $LMSTUDIO_PORT `
+                -Protocol TCP `
+                -Action Allow `
+                -ErrorAction SilentlyContinue | Out-Null
+            Write-Info "Firewall rule added. Retesting..."
+
+            $retestResult = & wsl -d $WSL_DISTRO -- bash -c "curl -fsS --max-time 5 '$baseUrl/v1/models' >/dev/null 2>&1 && echo OK || echo FAIL" 2>&1
+            $retestStr = ($retestResult | Out-String).Trim()
+            if ($retestStr -ne "OK") {
+                Write-Fatal "LM Studio is still not reachable from WSL2 at $baseUrl. Ensure 'Serve on Local Network' is enabled in LM Studio settings and that it listens on 0.0.0.0."
+            }
+        } else {
+            Write-Warn "Skipping firewall rule. The bash script will retry connectivity from inside WSL."
+        }
+    }
+
+    Write-Info "LM Studio endpoint for WSL2: $baseUrl"
+    return $baseUrl
+}
+
+# ---------------------------------------------------------------------------
+# Run the bash script inside WSL2, forwarding the LM Studio base URL.
 # ---------------------------------------------------------------------------
 function Invoke-BashScript {
+    param([string]$LMStudioBaseURL)
+
     Write-Info "Launching openclaw-amd.sh inside $WSL_DISTRO..."
 
-    # Pull and run the bash script as the default (non-root) user
-    & wsl -d $WSL_DISTRO -- bash -lc "curl -fsSL '$BASH_SCRIPT_URL' | bash"
+    # Build env var prefix — forward all overrides the bash script supports
+    $envParts = @("LMSTUDIO_BASE_URL='$LMStudioBaseURL'")
+
+    $forwardVars = @(
+        'OPENCLAW_AMD_MODEL_ID',
+        'OPENCLAW_AMD_CONTEXT_TOKENS',
+        'OPENCLAW_AMD_MODEL_MAX_TOKENS',
+        'OPENCLAW_AMD_MAX_AGENTS',
+        'OPENCLAW_AMD_MAX_SUBAGENTS',
+        'OPENCLAW_AMD_GATEWAY_PORT',
+        'OPENCLAW_AMD_GATEWAY_BIND',
+        'OPENCLAW_AMD_SKIP_TUNING',
+        'LMSTUDIO_PORT'
+    )
+
+    foreach ($varName in $forwardVars) {
+        $val = [Environment]::GetEnvironmentVariable($varName)
+        if ($val) {
+            $envParts += "$varName='$val'"
+        }
+    }
+
+    $envPrefix = $envParts -join ' '
+
+    & wsl -d $WSL_DISTRO -- bash -lc "$envPrefix curl -fsSL '$BASH_SCRIPT_URL' | bash"
 
     if ($LASTEXITCODE -eq 10) {
         # Exit code 10 = bash script enabled systemd and asked for wsl --shutdown
@@ -159,7 +260,7 @@ function Invoke-BashScript {
         & wsl --shutdown
         Start-Sleep -Seconds 3
         Write-Info "Resuming openclaw-amd.sh after systemd restart..."
-        & wsl -d $WSL_DISTRO -- bash -lc "curl -fsSL '$BASH_SCRIPT_URL' | bash"
+        & wsl -d $WSL_DISTRO -- bash -lc "$envPrefix curl -fsSL '$BASH_SCRIPT_URL' | bash"
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -193,7 +294,10 @@ if ($rebootRequired) {
 # Step 2 — Ubuntu 24.04
 Install-UbuntuDistro
 
-# Step 3 — openclaw-amd.sh
-Invoke-BashScript
+# Step 3 — Detect LM Studio and get endpoint URL for WSL2
+$lmStudioUrl = Find-LMStudioEndpoint
+
+# Step 4 — openclaw-amd.sh
+Invoke-BashScript -LMStudioBaseURL $lmStudioUrl
 
 Write-Info "$SCRIPT_NAME $SCRIPT_VERSION complete."
