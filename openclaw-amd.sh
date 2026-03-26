@@ -73,16 +73,29 @@ append_line_if_missing() {
 }
 
 prepare_npm_global_prefix() {
-  mkdir -p "$HOME/.config/systemd/user" "$HOME/.npm-global"
-  append_line_if_missing "$HOME/.profile" 'export PATH="$HOME/.npm-global/bin:$PATH"'
-  append_line_if_missing "$HOME/.bashrc" 'export PATH="$HOME/.npm-global/bin:$PATH"'
+  mkdir -p "$HOME/.config/systemd/user" "$HOME/.npm-global" "$HOME/.local/bin"
+
+  # Persist both ~/.npm-global/bin and ~/.local/bin (where openclaw may install)
+  local path_line='export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"'
+  append_line_if_missing "$HOME/.profile" "$path_line"
+  append_line_if_missing "$HOME/.bashrc" "$path_line"
   if [[ -f "$HOME/.zshrc" ]]; then
-    append_line_if_missing "$HOME/.zshrc" 'export PATH="$HOME/.npm-global/bin:$PATH"'
+    append_line_if_missing "$HOME/.zshrc" "$path_line"
   fi
+
   export NPM_CONFIG_PREFIX="$HOME/.npm-global"
-  export PATH="$HOME/.npm-global/bin:$PATH"
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
   if have npm; then
     npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+    # Also add the npm global prefix bin to profiles
+    local npm_prefix
+    npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+    if [[ -n "$npm_prefix" && "$npm_prefix" != "$HOME/.npm-global" ]]; then
+      local npm_path_line="export PATH=\"${npm_prefix}/bin:\$PATH\""
+      append_line_if_missing "$HOME/.profile" "$npm_path_line"
+      append_line_if_missing "$HOME/.bashrc" "$npm_path_line"
+      export PATH="${npm_prefix}/bin:$PATH"
+    fi
   fi
   hash -r 2>/dev/null || true
 }
@@ -669,18 +682,26 @@ PY
 install_skills() {
   # Ensure clawhub CLI is available — try npm first, then brew
   if ! have clawhub; then
-    info "Installing ClawHub CLI via npm"
-    if npm install -g clawhub 2>/dev/null; then
+    info "Installing ClawHub CLI via npm..."
+    if npm install -g clawhub 2>&1; then
       hash -r 2>/dev/null || true
+      info "ClawHub CLI installed via npm"
     else
-      warn "npm install failed. Trying Homebrew..."
+      warn "npm install -g clawhub failed (see output above)"
       if have brew; then
-        brew install clawhub 2>/dev/null || warn "brew install clawhub also failed."
+        info "Trying Homebrew: brew install clawhub..."
+        if brew install clawhub 2>&1; then
+          hash -r 2>/dev/null || true
+          info "ClawHub CLI installed via Homebrew"
+        else
+          warn "brew install clawhub also failed (see output above)"
+        fi
       else
-        warn "Homebrew not available. Will use npx fallback."
+        warn "Homebrew not available. Will try npx fallback for skill installs."
       fi
-      hash -r 2>/dev/null || true
     fi
+  else
+    info "ClawHub CLI already installed"
   fi
 
   local -a skills=(clawhub himalaya nano-pdf)
@@ -688,9 +709,15 @@ install_skills() {
   for skill in "${skills[@]}"; do
     info "Installing skill: ${skill}"
     if have clawhub; then
-      clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — install later with: clawhub install ${skill}"
+      if ! clawhub install "$skill" 2>&1; then
+        warn "clawhub install ${skill} failed (see output above)"
+      fi
     else
-      npx -y clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — install later with: npx clawhub install ${skill}"
+      info "  Falling back to: npx -y clawhub install ${skill}"
+      if ! npx -y clawhub install "$skill" 2>&1; then
+        warn "npx clawhub install ${skill} failed (see output above)"
+        warn "You can install it later with: npx clawhub install ${skill}"
+      fi
     fi
   done
 
@@ -751,10 +778,33 @@ launch_openclaw() {
   fi
 
   # Get the dashboard URL (includes access token)
-  local dashboard_url
-  dashboard_url="$(openclaw dashboard --no-open 2>/dev/null | grep -oP 'https?://\S+' | head -1 || true)"
+  local dashboard_url=""
+  local dashboard_output
+  dashboard_output="$(openclaw dashboard --no-open 2>&1 || true)"
+  dashboard_url="$(printf '%s' "$dashboard_output" | grep -oP 'https?://\S+' | head -1 || true)"
+
+  # If openclaw dashboard didn't return a URL, try to extract the token from config
+  if [[ -z "$dashboard_url" ]] && [[ -f "$OPENCLAW_CONFIG_FILE" ]]; then
+    local gw_token
+    gw_token="$(python3 -c "
+import json, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    token = cfg.get('gateway', {}).get('auth', {}).get('token', '')
+    if token:
+        print(token)
+except Exception:
+    pass
+" "$OPENCLAW_CONFIG_FILE" 2>/dev/null || true)"
+    if [[ -n "$gw_token" ]]; then
+      dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/#token=${gw_token}"
+    fi
+  fi
+
   if [[ -z "$dashboard_url" ]]; then
     dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
+    warn "Could not retrieve dashboard token. You may need to authenticate manually."
   fi
   info "Dashboard: ${dashboard_url}"
 
