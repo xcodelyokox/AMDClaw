@@ -30,6 +30,11 @@ LMSTUDIO_CONTEXT_TOKENS=""
 BREW_BIN=""
 
 print_banner() {
+  printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░░█░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
+  printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
   printf '\033[1;33m  🦞  AMD Quick Start  🦞\033[0m\n'
   printf '\n'
 }
@@ -177,87 +182,139 @@ refresh_lms_path() {
 }
 
 # ---------------------------------------------------------------------------
-# AMD GPU setup for WSL2.
-# Loads the amdgpu kernel module (included in Microsoft's WSL2 kernel) to
-# create /dev/dri/ render nodes, which RADV (Mesa Radeon Vulkan) needs to
-# enumerate the GPU. Falls back to amdgpu-install if modprobe alone is not
-# sufficient.
+# WSL2 AMD GPU setup via ROCm + librocdxg.
+# In WSL2 the GPU is exposed through /dev/dxg (DirectX paravirtualization).
+# librocdxg bridges /dev/dxg into the ROCm HSA runtime so llmster's ROCm
+# backend can reach the GPU without needing /dev/dri/ render nodes.
 # ---------------------------------------------------------------------------
-install_amdgpu_wsl2() {
+install_rocm_wsl2() {
   is_wsl || return 0
 
-  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
-    info "AMD GPU DRI render nodes already present"
+  # Persist HSA env vars so future shells and the llmster daemon pick them up.
+  append_line_if_missing "$HOME/.profile" 'export HSA_ENABLE_DXG_DETECTION=1'
+  append_line_if_missing "$HOME/.bashrc"  'export HSA_ENABLE_DXG_DETECTION=1'
+  append_line_if_missing "$HOME/.profile" 'export HSA_OVERRIDE_GFX_VERSION=11.5.1'
+  append_line_if_missing "$HOME/.bashrc"  'export HSA_OVERRIDE_GFX_VERSION=11.5.1'
+  export HSA_ENABLE_DXG_DETECTION=1
+  export HSA_OVERRIDE_GFX_VERSION=11.5.1
+
+  # Tip: set memory=96GB in %USERPROFILE%\.wslconfig on Windows so the full
+  # UMA VRAM pool is visible to the ROCm runtime.
+
+  if have rocminfo && rocminfo 2>&1 | grep -qiE 'gfx1151|Load librocdxg'; then
+    info "ROCm already installed and GPU detected — skipping install"
     return 0
   fi
 
-  info "Loading amdgpu kernel module"
-  run_root modprobe amdgpu 2>/dev/null || true
-  printf 'amdgpu\n' | run_root tee /etc/modules-load.d/amdgpu.conf >/dev/null
-  sleep 2
-
-  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
-    info "AMD GPU DRI render nodes created"
-    return 0
-  fi
-
-  info "Adding AMD GPU repository and installing graphics driver"
-  local repo_base="https://repo.radeon.com/amdgpu-install/6.3.3/ubuntu/noble"
-  local deb="amdgpu-install_6.3.60303-1_all.deb"
+  info "Installing ROCm for WSL2 (usecase=wsl,rocm, no DKMS)"
+  local repo_base="https://repo.radeon.com/amdgpu-install/7.2/ubuntu/noble"
+  local deb="amdgpu-install_7.2.70200-1_all.deb"
   if ! have amdgpu-install; then
     wget -qO "/tmp/${deb}" "${repo_base}/${deb}" \
       || { warn "Could not fetch amdgpu-install — GPU acceleration may not be available"; return 0; }
     DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "/tmp/${deb}"
   fi
-  run_root amdgpu-install -y --usecase=graphics --no-dkms --accept-eula
-  run_root udevadm trigger --subsystem-match=drm 2>/dev/null || true
-  sleep 2
+  run_root amdgpu-install -y --usecase=wsl,rocm --no-dkms --accept-eula \
+    || { warn "amdgpu-install failed — GPU acceleration may not be available"; return 0; }
 
-  if compgen -G "/dev/dri/render*" > /dev/null 2>&1; then
-    info "AMD GPU DRI render nodes created"
+  # Install librocdxg — the WSL2 DXG bridge that lets ROCm use /dev/dxg.
+  info "Installing librocdxg (ROCm WSL2 /dev/dxg bridge)"
+  local librocdxg_url
+  librocdxg_url="$(curl -fsS https://api.github.com/repos/ROCm/librocdxg/releases/latest \
+    | python3 -c "
+import json, sys
+assets = json.load(sys.stdin).get('assets', [])
+for a in assets:
+    if a['name'].endswith('_amd64.deb'):
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null || true)"
+  if [[ -n "$librocdxg_url" ]]; then
+    wget -qO /tmp/librocdxg.deb "$librocdxg_url" \
+      && DEBIAN_FRONTEND=noninteractive run_root dpkg -i /tmp/librocdxg.deb \
+      || warn "librocdxg install failed — GPU may not be visible to ROCm"
   else
-    warn "AMD GPU DRI nodes not found after install — GPU acceleration may not be available"
+    warn "Could not resolve librocdxg release URL — GPU may not be visible to ROCm"
+  fi
+
+  run_root usermod -a -G render,video "$USER" 2>/dev/null || true
+
+  info "Testing ROCm GPU detection (needs wsl --shutdown + restart if this fails)"
+  if rocminfo 2>&1 | grep -qiE 'gfx1151|Load librocdxg'; then
+    info "ROCm GPU detected successfully"
+  else
+    warn "ROCm GPU not detected — run 'wsl --shutdown' from PowerShell, reopen Ubuntu, and rerun"
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Select the Vulkan llama.cpp runtime in llmster and prefer the RADV ICD.
+# Select the best available llmster runtime for AMD GPU acceleration.
+# Tries ROCm first (if librocdxg is installed), then Vulkan, then warns.
 # ---------------------------------------------------------------------------
-ensure_lms_vulkan_runtime() {
-  info "Selecting Vulkan runtime in llmster"
+ensure_lms_gpu_runtime() {
+  lms_runtime_ls_clean() {
+    "$LMS_BIN" runtime ls 2>/dev/null \
+      | sed 's/\x1b\[[0-9;]*[mK]//g'
+  }
 
-  # Prefer the Mesa RADV driver for AMD GPU Vulkan acceleration.
+  # Prefer the Mesa RADV ICD for any Vulkan path.
   local radv_icd="/usr/share/vulkan/icd.d/radeon_icd.json"
   if [[ -f "$radv_icd" ]]; then
     export AMD_VULKAN_ICD=RADV
     append_line_if_missing "$HOME/.profile" 'export AMD_VULKAN_ICD=RADV'
     append_line_if_missing "$HOME/.bashrc"  'export AMD_VULKAN_ICD=RADV'
-    info "RADV ICD preferred for Vulkan"
   fi
 
-  # Discover the installed Vulkan runtime name (version-agnostic)
+  # Try ROCm runtime first — only available if librocdxg bridged /dev/dxg.
+  local rocm_runtime
+  rocm_runtime="$(lms_runtime_ls_clean \
+    | grep -i 'rocm' \
+    | awk '{print $1}' \
+    | head -1 || true)"
+
+  if [[ -z "$rocm_runtime" ]]; then
+    "$LMS_BIN" runtime get llama.cpp-rocm 2>/dev/null \
+      || "$LMS_BIN" runtime install llama.cpp-rocm 2>/dev/null \
+      || true
+    rocm_runtime="$(lms_runtime_ls_clean \
+      | grep -i 'rocm' \
+      | awk '{print $1}' \
+      | head -1 || true)"
+  fi
+
+  if [[ -n "$rocm_runtime" ]]; then
+    info "ROCm runtime found: ${rocm_runtime}"
+    "$LMS_BIN" runtime select "$rocm_runtime" \
+      || warn "Could not activate ROCm runtime — check 'lms runtime select' output above"
+    info "ROCm runtime selected: ${rocm_runtime}"
+    return 0
+  fi
+
+  # Fall back to Vulkan runtime.
+  info "ROCm runtime not available — falling back to Vulkan runtime"
   local vulkan_runtime
-  vulkan_runtime="$("$LMS_BIN" runtime ls 2>/dev/null \
-    | grep -oP 'llama\.cpp-linux-x86_64-vulkan[^\s]+' \
+  vulkan_runtime="$(lms_runtime_ls_clean \
+    | grep -i 'vulkan' \
+    | awk '{print $1}' \
     | head -1 || true)"
 
   if [[ -z "$vulkan_runtime" ]]; then
     info "Vulkan runtime not found — attempting install"
-    "$LMS_BIN" runtime install llama.cpp-vulkan 2>/dev/null \
-      || "$LMS_BIN" runtime get llama.cpp-vulkan 2>/dev/null \
+    "$LMS_BIN" runtime get llama.cpp-vulkan 2>/dev/null \
+      || "$LMS_BIN" runtime install llama.cpp-vulkan 2>/dev/null \
       || true
-    vulkan_runtime="$("$LMS_BIN" runtime ls 2>/dev/null \
-      | grep -oP 'llama\.cpp-linux-x86_64-vulkan[^\s]+' \
+    vulkan_runtime="$(lms_runtime_ls_clean \
+      | grep -i 'vulkan' \
+      | awk '{print $1}' \
       | head -1 || true)"
   fi
 
   if [[ -n "$vulkan_runtime" ]]; then
-    "$LMS_BIN" runtime use "$vulkan_runtime" 2>/dev/null \
-      || "$LMS_BIN" runtime select "$vulkan_runtime" 2>/dev/null \
-      || true
+    "$LMS_BIN" runtime select "$vulkan_runtime" \
+      || warn "Could not activate Vulkan runtime — check 'lms runtime select' output above"
     info "Vulkan runtime selected: ${vulkan_runtime}"
   else
-    warn "Could not find or install a Vulkan runtime — llmster will use the CPU backend"
+    warn "No GPU runtime available — llmster will use the CPU backend"
   fi
 }
 
@@ -306,16 +363,20 @@ import json
 print(json.dumps({
     'model':          '${OPENCLAW_AMD_MODEL_ID}',
     'context_length': ${OPENCLAW_AMD_CONTEXT_TOKENS},
-    'gpu_offload':    'max',
     'flash_attention': True,
-    'try_mmap':       True,
 }))
 ")"
-  curl -fsS --max-time 120 \
+  local response
+  response="$(curl -fsS --max-time 120 \
     -H "Authorization: Bearer ${LMSTUDIO_API_KEY}" \
     -H "Content-Type: application/json" \
     -d "$payload" \
-    "http://127.0.0.1:${LMSTUDIO_PORT}/api/v1/models/load" >/dev/null 2>&1
+    "http://127.0.0.1:${LMSTUDIO_PORT}/api/v1/models/load" 2>&1)"
+  # Fail loudly if the API returns an error object
+  if printf '%s' "$response" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if 'error' not in d else 1)" 2>/dev/null; then
+    return 0
+  fi
+  return 1
 }
 
 load_model_via_cli() {
@@ -845,7 +906,7 @@ main() {
   apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
-  install_amdgpu_wsl2
+  install_rocm_wsl2
 
   install_homebrew_if_missing
   install_chrome_if_missing
@@ -856,7 +917,7 @@ main() {
   # Install llmster (headless LM Studio core) and start the local API server
   install_llmster
   persist_lms_path
-  ensure_lms_vulkan_runtime
+  ensure_lms_gpu_runtime
   start_llmster_server
 
   if ! resolve_lmstudio_endpoint; then
