@@ -1,6 +1,6 @@
 # OpenClaw on AMD — LM Studio + WSL2 Quick Start
 
-This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single command. LM Studio runs natively on Windows with GPU offload; OpenClaw runs inside WSL2 and connects to LM Studio over the LAN.
+This repo collapses the WSL2 + LM Studio + OpenClaw setup into a single command. LM Studio runs natively on Windows with GPU offload; OpenClaw runs inside WSL2 and connects to LM Studio over the LAN.
 
 > **Architecture:** LM Studio on Windows host &rarr; WSL2 connects via `http://<host-ip>:1234`
 >
@@ -12,19 +12,17 @@ This repo collapses AMD's WSL2 + LM Studio + OpenClaw setup into a single comman
 
 ## Prerequisites
 
-This AMD Quisck Start guide is intended to be used with the RyzenClaw and RadeonClaw BKCs [Full Guide](https://www.amd.com/en/resources/articles/run-openclaw-locally-on-amd-ryzen-ai-max-and-radeon-gpus.html)
-
-1. For AMD Ryzen AI Max+ users: **Variable Graphics Memory** set to 96GB
-2. **LM Studio** installed and running on Windows with at least one model loaded, context properly configured and LM Studio server running with "Serve on Local Network" setting selected. 
+1. **LM Studio** installed and running on Windows with at least one model loaded
 2. **WSL2 with Ubuntu 24.04** — open PowerShell as Administrator and run the following:
-```powershell
-wsl --install --no-distribution
-```
-Restart your machine if prompted, then run:
-```powershell
-wsl --install -d Ubuntu-24.04
-```
-Follow the prompts to create a Unix username and password. 
+   ```powershell
+   wsl --install --no-distribution
+   ```
+   Restart your machine if prompted, then run:
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+   Follow the prompts to create a Unix username and password.
+3. For AMD Ryzen AI Max+ systems: Variable Graphics Memory set to 96GB (see [AMD article](https://www.amd.com/en/resources/articles/run-openclaw-locally-on-amd-ryzen-ai-max-and-radeon-gpus.html))
 
 ---
 
@@ -33,6 +31,13 @@ Follow the prompts to create a Unix username and password.
 Open your Ubuntu/WSL terminal and run:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
+```
+
+Or pass the LM Studio URL explicitly:
+
+```bash
+LMSTUDIO_BASE_URL=http://172.20.0.1:1234 \
 curl -fsSL https://raw.githubusercontent.com/xcodelyokox/amdclaw/main/openclaw-amd.sh | bash
 ```
 
