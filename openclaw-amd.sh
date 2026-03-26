@@ -628,10 +628,25 @@ if entry is None:
 entry['contextWindow'] = context_tokens
 entry['maxTokens'] = model_max_tokens
 
+# --- Local embeddings for Memory.md (embeddinggemma-300m via node-llama-cpp) ---
+ms = defaults.setdefault('memorySearch', {})
+ms['enabled'] = True
+ms['provider'] = 'local'
+ms.setdefault('local', {})
+ms['local']['modelPath'] = 'hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf'
+ms.setdefault('query', {})
+ms['query']['maxResults'] = 30
+ms['query']['minScore'] = 0.15
+ms['query'].setdefault('hybrid', {})
+ms['query']['hybrid']['enabled'] = True
+ms['query']['hybrid']['vectorWeight'] = 0.7
+ms['query']['hybrid']['textWeight'] = 0.3
+
 config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
 PY
 
   info "Applied OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
+  info "Local embeddings configured (embeddinggemma-300m — will auto-download on first use)"
 }
 
 print_summary() {
@@ -647,7 +662,7 @@ print_summary() {
 }
 
 # ---------------------------------------------------------------------------
-# Start the OpenClaw gateway, open the dashboard, then launch TUI.
+# Start the OpenClaw gateway and open the dashboard in Chrome inside WSL2.
 # ---------------------------------------------------------------------------
 launch_openclaw() {
   print_summary
@@ -677,11 +692,10 @@ launch_openclaw() {
     (( gw_attempts++ )) || true
   done
   if (( ! gw_ready )); then
-    warn "Gateway may not be fully ready; TUI might take a moment to connect."
+    warn "Gateway may not be fully ready; dashboard might take a moment to load."
   fi
 
-  # Open dashboard in Windows default browser (no Chrome install needed)
-  info "Opening OpenClaw dashboard"
+  # Get the dashboard URL (includes access token)
   local dashboard_url
   dashboard_url="$(openclaw dashboard --no-open 2>/dev/null | grep -oP 'https?://\S+' | head -1 || true)"
   if [[ -z "$dashboard_url" ]]; then
@@ -689,27 +703,31 @@ launch_openclaw() {
   fi
   info "Dashboard: ${dashboard_url}"
 
-  if is_wsl; then
-    cmd.exe /c start "" "$dashboard_url" 2>/dev/null &
-    disown 2>/dev/null || true
-  elif have xdg-open; then
-    xdg-open "$dashboard_url" >/dev/null 2>&1 &
-    disown
+  # Open dashboard in Chrome inside WSL2
+  local chrome_bin=""
+  if have google-chrome-stable; then
+    chrome_bin="google-chrome-stable"
+  elif have google-chrome; then
+    chrome_bin="google-chrome"
+  elif have chromium-browser; then
+    chrome_bin="chromium-browser"
+  elif have chromium; then
+    chrome_bin="chromium"
   fi
 
-  # Let the gateway finish any post-bind initialization
-  sleep 1
+  if [[ -n "$chrome_bin" ]]; then
+    info "Opening dashboard in Chrome (WSL2)"
+    nohup "$chrome_bin" --no-first-run --no-default-browser-check \
+      "$dashboard_url" >/dev/null 2>&1 &
+    disown
+  else
+    warn "Chrome not found in WSL2. Open the dashboard manually:"
+    info "  $dashboard_url"
+  fi
 
-  # Flush any buffered stdin from prior script interaction
-  while read -t 0.1 -n 1 -r 2>/dev/null; do :; done
-
-  # Full terminal reset before launching TUI
-  reset 2>/dev/null || stty sane 2>/dev/null || true
-
-  info "Launching TUI — press Q to quit (gateway keeps running)"
-  printf '\n'
-  openclaw tui
-  exit $?
+  info "Gateway is running in the background."
+  info "To check status:  openclaw gateway status"
+  info "To stop gateway:  openclaw gateway stop"
 }
 
 main() {
