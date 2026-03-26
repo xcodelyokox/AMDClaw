@@ -16,7 +16,6 @@ OPENCLAW_AMD_GATEWAY_BIND="${OPENCLAW_AMD_GATEWAY_BIND:-loopback}"
 OPENCLAW_AMD_SKIP_TUNING="${OPENCLAW_AMD_SKIP_TUNING:-0}"
 
 SYSTEMD_READY=0
-DAEMON_INSTALLED=0
 RAN_ONBOARD=0
 
 print_banner() {
@@ -501,43 +500,14 @@ run_noninteractive_onboard() {
     --secret-input-mode plaintext
     --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
     --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
+    --skip-health
     --accept-risk
   )
 
-  if (( SYSTEMD_READY )); then
-    cmd+=(--install-daemon --daemon-runtime node)
-  fi
-
   info "Configuring OpenClaw against LM Studio (${base_url})"
   if "${cmd[@]}"; then
-    DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
     RAN_ONBOARD=1
     return 0
-  fi
-
-  if (( SYSTEMD_READY )); then
-    warn "Onboarding with daemon install failed. Retrying without daemon installation."
-    local retry_cmd=(
-      openclaw onboard
-      --non-interactive
-      --mode local
-      --auth-choice custom-api-key
-      --custom-base-url "$base_url"
-      --custom-model-id "$OPENCLAW_AMD_MODEL_ID"
-      --custom-provider-id "$provider_id"
-      --custom-compatibility "anthropic"
-      --custom-api-key "$api_key"
-      --secret-input-mode plaintext
-      --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
-      --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
-      --skip-health
-      --accept-risk
-    )
-    if "${retry_cmd[@]}"; then
-      DAEMON_INSTALLED=0
-      RAN_ONBOARD=1
-      return 0
-    fi
   fi
 
   return 1
@@ -724,7 +694,6 @@ main() {
     info "OpenClaw already configured for lmstudio/${OPENCLAW_AMD_MODEL_ID} — skipping onboard"
     configured=1
     RAN_ONBOARD=1
-    DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
   else
     backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
     if run_noninteractive_onboard "$LMSTUDIO_BASE_URL"; then
@@ -737,10 +706,17 @@ main() {
 
   auto_tune_config
 
-  # Ensure DISPLAY is set for WSLg's X server (needed for Chrome in WSL2)
-  if [[ -z "$DISPLAY" ]] && [[ -S /tmp/.X11-unix/X0 ]]; then
+  # Ensure DISPLAY is set for WSLg's X server (needed for Chrome in WSL2).
+  # Persist to shell profiles so the OpenClaw agent's shells also have it.
+  if [[ -S /tmp/.X11-unix/X0 ]]; then
     export DISPLAY=:0
-    info "Set DISPLAY=:0 (WSLg X server detected)"
+    local display_line='export DISPLAY=:0'
+    append_line_if_missing "$HOME/.profile" "$display_line"
+    append_line_if_missing "$HOME/.bashrc" "$display_line"
+    if [[ -f "$HOME/.zshrc" ]]; then
+      append_line_if_missing "$HOME/.zshrc" "$display_line"
+    fi
+    info "DISPLAY=:0 set and persisted to shell profiles (WSLg X server detected)"
   fi
 
   # Interactive onboard pass — lets the user configure hooks, skills, channels
