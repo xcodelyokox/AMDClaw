@@ -813,13 +813,40 @@ main() {
 
   # Risk acknowledgement — shown first, before any installs or changes
   printf '\n'
-  warn "============================================================"
-  warn "  IMPORTANT: OpenClaw is a highly autonomous AI agent."
-  warn "  Giving any AI agent access to your system may result in"
-  warn "  unpredictable actions with unpredictable outcomes."
-  warn "  AMD recommends running on a separate, clean PC with no"
-  warn "  personal data, or within a virtual machine."
-  warn "============================================================"
+  warn "================================================================"
+  warn "  IMPORTANT — PLEASE READ BEFORE CONTINUING"
+  warn "================================================================"
+  printf '\n'
+  warn "OpenClaw is a highly autonomous AI agent. Giving any AI agent"
+  warn "access to any system may result in the AI acting in unpredictable"
+  warn "ways with unpredictable/unforeseen outcomes. Use of any AMD"
+  warn "suggested implementations is made at your own risk. AMD makes no"
+  warn "representations/warranties with your use of an AI agent as"
+  warn "described herein. Failure to exercise appropriate caution may"
+  warn "result in damages (foreseen and/or unforeseen)."
+  printf '\n'
+  warn "To help protect from any such damages, we expressly recommend"
+  warn "the use of the following precautions PRIOR to use of any AI"
+  warn "agent of this nature:"
+  printf '\n'
+  warn "  1. Run the AI agent on a separate, clean PC that has no"
+  warn "     personal data, or within a virtual machine. Only ever"
+  warn "     copy specific data you want the agent to access."
+  printf '\n'
+  warn "  2. Strictly avoid granting access to any of your personal"
+  warn "     or primary accounts. Instead, create dedicated accounts"
+  warn "     for the agent and provide only the specific information"
+  warn "     or permissions required for these separate accounts."
+  printf '\n'
+  warn "  3. Carefully review and limit which skills or extensions"
+  warn "     are enabled for the agent."
+  printf '\n'
+  warn "  4. Ensure that any interfaces used to access your agentic"
+  warn "     assistant (such as the web UI or messaging integrations)"
+  warn "     are protected and not accessible without authorization"
+  warn "     over local networks or the internet."
+  printf '\n'
+  warn "================================================================"
   printf '\n'
   local accept=""
   read -r -p "Do you accept the risk and wish to continue? [y/N]: " accept < /dev/tty
