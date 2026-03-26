@@ -649,6 +649,12 @@ ms['query']['hybrid']['enabled'] = True
 ms['query']['hybrid']['vectorWeight'] = 0.7
 ms['query']['hybrid']['textWeight'] = 0.3
 
+# --- Browser profile: connect to Chrome via CDP on port 9222 ---
+browser = cfg.setdefault('browser', {})
+profiles = browser.setdefault('profiles', {})
+chrome_profile = profiles.setdefault('default', {})
+chrome_profile['cdpUrl'] = 'http://127.0.0.1:9222'
+
 config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
 PY
 
@@ -661,13 +667,20 @@ PY
 # Install ClawHub skills: clawhub, himalaya, nano-pdf
 # ---------------------------------------------------------------------------
 install_skills() {
-  # Ensure clawhub CLI is available
+  # Ensure clawhub CLI is available — try npm first, then brew
   if ! have clawhub; then
-    info "Installing ClawHub CLI"
-    npm install -g clawhub 2>/dev/null || {
-      warn "Failed to install clawhub CLI globally. Trying npx fallback."
-    }
-    hash -r 2>/dev/null || true
+    info "Installing ClawHub CLI via npm"
+    if npm install -g clawhub 2>/dev/null; then
+      hash -r 2>/dev/null || true
+    else
+      warn "npm install failed. Trying Homebrew..."
+      if have brew; then
+        brew install clawhub 2>/dev/null || warn "brew install clawhub also failed."
+      else
+        warn "Homebrew not available. Will use npx fallback."
+      fi
+      hash -r 2>/dev/null || true
+    fi
   fi
 
   local -a skills=(clawhub himalaya nano-pdf)
@@ -675,9 +688,9 @@ install_skills() {
   for skill in "${skills[@]}"; do
     info "Installing skill: ${skill}"
     if have clawhub; then
-      clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — you can install it later with: clawhub install ${skill}"
+      clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — install later with: clawhub install ${skill}"
     else
-      npx clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — you can install it later with: npx clawhub install ${skill}"
+      npx -y clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — install later with: npx clawhub install ${skill}"
     fi
   done
 
@@ -757,11 +770,21 @@ launch_openclaw() {
     chrome_bin="chromium"
   fi
 
+  local chrome_debug_port=9222
+  local chrome_user_data="$HOME/.openclaw/browser/chrome-profile"
+  mkdir -p "$chrome_user_data"
+
   if [[ -n "$chrome_bin" ]]; then
-    info "Opening dashboard in Chrome (WSL2)"
-    nohup "$chrome_bin" --no-first-run --no-default-browser-check \
+    info "Launching Chrome with remote debugging (port ${chrome_debug_port}) for OpenClaw browser control"
+    nohup "$chrome_bin" \
+      --no-first-run \
+      --no-default-browser-check \
+      --remote-debugging-port="$chrome_debug_port" \
+      --remote-allow-origins="*" \
+      --user-data-dir="$chrome_user_data" \
       "$dashboard_url" >/dev/null 2>&1 &
     disown
+    info "Chrome running with CDP on port ${chrome_debug_port}"
   else
     warn "Chrome not found in WSL2. Open the dashboard manually:"
     info "  $dashboard_url"
@@ -791,6 +814,25 @@ main() {
   install_or_update_openclaw
   prepare_npm_global_prefix
   require_openclaw
+
+  # Risk acknowledgement (shown to user before onboard)
+  if ! is_openclaw_configured; then
+    printf '\n'
+    warn "============================================================"
+    warn "  IMPORTANT: OpenClaw is a highly autonomous AI agent."
+    warn "  Giving any AI agent access to your system may result in"
+    warn "  unpredictable actions with unpredictable outcomes."
+    warn "  AMD recommends running on a separate, clean PC with no"
+    warn "  personal data, or within a virtual machine."
+    warn "============================================================"
+    printf '\n'
+    local accept=""
+    read -r -p "Do you accept the risk and wish to continue? [y/N]: " accept < /dev/tty
+    if [[ ! "$accept" =~ ^[Yy] ]]; then
+      die "Risk not accepted. Exiting."
+    fi
+    printf '\n'
+  fi
 
   # Onboard or skip if already configured
   local configured=0
