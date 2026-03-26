@@ -146,25 +146,15 @@ PY
 # ---------------------------------------------------------------------------
 # LM Studio detection — resolve Windows host IP from inside WSL2
 # ---------------------------------------------------------------------------
-detect_host_ip() {
-  local ip=""
 
-  # Method 1: /etc/resolv.conf nameserver (most reliable for WSL2)
-  if [[ -f /etc/resolv.conf ]]; then
-    ip="$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}' || true)"
-  fi
+LMSTUDIO_PORT="${LMSTUDIO_PORT:-1234}"
 
-  # Method 2: default gateway
-  if [[ -z "$ip" ]]; then
-    ip="$(ip route show default 2>/dev/null | awk '{print $3}' | head -1 || true)"
-  fi
-
-  # Validate IPv4
-  if [[ -z "$ip" ]] || ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    die "Could not determine Windows host IP from WSL2. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.1.100:1234/v1)."
-  fi
-
-  printf '%s' "$ip"
+# Probe a candidate IP for a reachable LM Studio API.
+# Tries the native /api/v1 endpoint first, then the OpenAI-compat /v1 endpoint.
+probe_lmstudio() {
+  local ip="$1"
+  curl -fsS --max-time 2 "http://${ip}:${LMSTUDIO_PORT}/v1/models" >/dev/null 2>&1 \
+    || curl -fsS --max-time 2 "http://${ip}:${LMSTUDIO_PORT}/api/v1/models" >/dev/null 2>&1
 }
 
 resolve_lmstudio_url() {
@@ -174,17 +164,79 @@ resolve_lmstudio_url() {
     return 0
   fi
 
-  # Check mirrored networking first (newer Windows 11 builds)
-  if curl -fsS --max-time 2 "http://127.0.0.1:1234/v1/models" >/dev/null 2>&1; then
-    LMSTUDIO_BASE_URL="http://127.0.0.1:1234/v1"
-    info "LM Studio reachable on localhost (mirrored networking): $LMSTUDIO_BASE_URL"
-    return 0
+  info "Detecting LM Studio on Windows host..."
+
+  # Collect unique candidate IPs to try, in priority order
+  local -a candidates=()
+
+  # 1. Mirrored networking (newer Windows 11) — localhost works directly
+  candidates+=("127.0.0.1")
+
+  # 2. Default gateway — usually the Windows host in WSL2 NAT mode
+  local gw_ip
+  gw_ip="$(ip route show default 2>/dev/null | awk '{print $3}' | head -1 || true)"
+  if [[ -n "$gw_ip" ]] && [[ "$gw_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    candidates+=("$gw_ip")
   fi
 
-  local host_ip
-  host_ip="$(detect_host_ip)"
-  LMSTUDIO_BASE_URL="http://${host_ip}:1234/v1"
-  info "Auto-detected LM Studio URL: $LMSTUDIO_BASE_URL"
+  # 3. /etc/resolv.conf nameserver
+  local dns_ip
+  if [[ -f /etc/resolv.conf ]]; then
+    dns_ip="$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}' || true)"
+    if [[ -n "$dns_ip" ]] && [[ "$dns_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      candidates+=("$dns_ip")
+    fi
+  fi
+
+  # 4. Ask PowerShell for ALL host IPv4 addresses (WSL adapter, LAN, Wi-Fi, etc.)
+  #    This catches the real LAN IP (e.g. 192.168.0.218) that LM Studio binds to
+  #    when "Serve on Local Network" is enabled.
+  local ps_ips
+  ps_ips="$(powershell.exe -NoProfile -Command \
+    'Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } | ForEach-Object { $_.IPAddress }' \
+    2>/dev/null | tr -d '\r' || true)"
+  local ps_ip
+  while IFS= read -r ps_ip; do
+    ps_ip="${ps_ip// /}"
+    if [[ -n "$ps_ip" ]] && [[ "$ps_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      candidates+=("$ps_ip")
+    fi
+  done <<< "$ps_ips"
+
+  # De-duplicate while preserving order
+  local -a unique=()
+  local -A seen=()
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -z "${seen[$c]+x}" ]]; then
+      seen[$c]=1
+      unique+=("$c")
+    fi
+  done
+
+  # Probe each candidate
+  for c in "${unique[@]}"; do
+    info "  Trying ${c}:${LMSTUDIO_PORT} ..."
+    if probe_lmstudio "$c"; then
+      LMSTUDIO_BASE_URL="http://${c}:${LMSTUDIO_PORT}/v1"
+      info "LM Studio found at: $LMSTUDIO_BASE_URL"
+      return 0
+    fi
+  done
+
+  # None worked — ask the user
+  warn "Could not auto-detect LM Studio. Tried: ${unique[*]}"
+  warn "Ensure LM Studio is running on Windows with a model loaded."
+  warn "Ensure 'Serve on Local Network' is enabled in LM Studio settings."
+  warn "Ensure Windows Firewall allows inbound connections on port ${LMSTUDIO_PORT}."
+  printf '\n'
+  read -r -p "Enter the LM Studio host IP (e.g. 192.168.0.218): " user_ip
+  user_ip="${user_ip// /}"
+  if [[ -z "$user_ip" ]]; then
+    die "No IP provided. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.0.218:${LMSTUDIO_PORT}/v1)."
+  fi
+  LMSTUDIO_BASE_URL="http://${user_ip}:${LMSTUDIO_PORT}/v1"
+  info "Using user-provided LM Studio URL: $LMSTUDIO_BASE_URL"
 }
 
 wait_for_lmstudio() {
@@ -274,6 +326,34 @@ for m in models:
   done
 
   info "Selected model: ${OPENCLAW_AMD_MODEL_ID}"
+}
+
+# ---------------------------------------------------------------------------
+# Google Chrome — required so OpenClaw can drive a visible browser inside WSL2
+# ---------------------------------------------------------------------------
+install_chrome_if_missing() {
+  if have google-chrome-stable || have google-chrome || have chromium-browser || have chromium; then
+    info "Chrome/Chromium already installed — skipping"
+    return 0
+  fi
+
+  info "Installing Google Chrome"
+  apt_install_if_missing wget gnupg2
+
+  wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
+    | run_root gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+
+  printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' \
+    | run_root tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+
+  run_root apt-get update
+  DEBIAN_FRONTEND=noninteractive run_root apt-get install -y google-chrome-stable
+
+  have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH."
+
+  apt_install_if_missing wslu
+
+  info "Google Chrome installed"
 }
 
 # ---------------------------------------------------------------------------
@@ -567,7 +647,7 @@ launch_openclaw() {
 main() {
   print_banner
   require_linux
-  apt_install_if_missing ca-certificates curl git python3 build-essential
+  apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
 
@@ -575,6 +655,9 @@ main() {
   resolve_lmstudio_url
   wait_for_lmstudio
   select_lmstudio_model
+
+  # Chrome (needed for OpenClaw browser control inside WSL2)
+  install_chrome_if_missing
 
   # OpenClaw install
   install_or_update_openclaw
