@@ -902,6 +902,7 @@ main() {
     --skip-search \
     --skip-skills \
     --skip-channels \
+    --skip-daemon \
     --skip-health \
     < /dev/tty || warn "Hatching exited with an error. You can launch it later with: openclaw onboard"
 }
