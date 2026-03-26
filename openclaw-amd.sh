@@ -907,7 +907,7 @@ main() {
   # channels. Skips auth (already configured) and hatch (we do that in a 3rd pass).
   info "Launching interactive onboard for gateway, hooks, skills, and channels..."
   printf '\n'
-  openclaw onboard --auth-choice skip --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
+  openclaw onboard --skip-auth-choice --skip-ui < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
   printf '\n'
 
   # Write browser environment info to TOOLS.md so the agent knows how to use Chrome
@@ -926,7 +926,9 @@ main() {
   info "Launching hatching..."
   printf '\n'
   openclaw onboard \
-    --auth-choice skip \
+    --skip-auth-choice \
+    --accept-risk \
+    --skip-hooks \
     --skip-search \
     --skip-skills \
     --skip-channels \
