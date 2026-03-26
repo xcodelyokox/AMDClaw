@@ -34,8 +34,14 @@ function Assert-Admin {
 # Returns $true if a reboot is required before continuing.
 # ---------------------------------------------------------------------------
 function Install-WSL2Feature {
-    $ver = & wsl --version 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $wslReady = $false
+    try {
+        $null = & wsl --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $wslReady = $true }
+    } catch {
+        # WSL not installed — stderr triggered a terminating error
+    }
+    if ($wslReady) {
         Write-Info "WSL2 is already installed and ready."
         return $false
     }
