@@ -488,7 +488,6 @@ run_noninteractive_onboard() {
     --secret-input-mode plaintext
     --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
     --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
-    --skip-skills
     --accept-risk
   )
 
@@ -518,7 +517,6 @@ run_noninteractive_onboard() {
       --secret-input-mode plaintext
       --gateway-port "$OPENCLAW_AMD_GATEWAY_PORT"
       --gateway-bind "$OPENCLAW_AMD_GATEWAY_BIND"
-      --skip-skills
       --skip-health
       --accept-risk
     )
@@ -628,6 +626,15 @@ if entry is None:
 entry['contextWindow'] = context_tokens
 entry['maxTokens'] = model_max_tokens
 
+# --- Enable hooks: boot-md, command-logger, session-memory ---
+hooks = cfg.setdefault('hooks', {})
+internal = hooks.setdefault('internal', {})
+internal['enabled'] = True
+entries = internal.setdefault('entries', {})
+for hook_name in ('boot-md', 'command-logger', 'session-memory'):
+    hook = entries.setdefault(hook_name, {})
+    hook['enabled'] = True
+
 # --- Local embeddings for Memory.md (embeddinggemma-300m via node-llama-cpp) ---
 ms = defaults.setdefault('memorySearch', {})
 ms['enabled'] = True
@@ -646,7 +653,42 @@ config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encodi
 PY
 
   info "Applied OpenClaw tuning to ${OPENCLAW_CONFIG_FILE}"
+  info "Hooks enabled: boot-md, command-logger, session-memory"
   info "Local embeddings configured (embeddinggemma-300m — will auto-download on first use)"
+}
+
+# ---------------------------------------------------------------------------
+# Install ClawHub skills: clawhub, himalaya, nano-pdf
+# ---------------------------------------------------------------------------
+install_skills() {
+  # Ensure clawhub CLI is available
+  if ! have clawhub; then
+    info "Installing ClawHub CLI"
+    npm install -g clawhub 2>/dev/null || {
+      warn "Failed to install clawhub CLI globally. Trying npx fallback."
+    }
+    hash -r 2>/dev/null || true
+  fi
+
+  local -a skills=(clawhub himalaya nano-pdf)
+  local skill
+  for skill in "${skills[@]}"; do
+    info "Installing skill: ${skill}"
+    if have clawhub; then
+      clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — you can install it later with: clawhub install ${skill}"
+    else
+      npx clawhub install "$skill" 2>/dev/null || warn "Failed to install skill '${skill}' — you can install it later with: npx clawhub install ${skill}"
+    fi
+  done
+
+  # Enable hooks via CLI as a safety net (in case config write didn't take)
+  local -a hooks_to_enable=(boot-md command-logger session-memory)
+  local hook
+  for hook in "${hooks_to_enable[@]}"; do
+    openclaw hooks enable "$hook" 2>/dev/null || true
+  done
+
+  info "Skills and hooks configured"
 }
 
 print_summary() {
@@ -768,6 +810,7 @@ main() {
   fi
 
   auto_tune_config
+  install_skills
   launch_openclaw
 }
 
