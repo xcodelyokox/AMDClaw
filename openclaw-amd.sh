@@ -160,6 +160,7 @@ install_ollama_if_missing() {
   fi
 
   info "Installing Ollama"
+  apt_install_if_missing zstd
   curl -fsSL https://ollama.com/install.sh | sh
 
   refresh_ollama_path
