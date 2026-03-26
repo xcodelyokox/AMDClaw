@@ -958,7 +958,7 @@ main() {
   # remaining steps (hooks, skills, channels, web search).
   info "Launching interactive onboard for hooks, skills, and channels setup..."
   printf '\n'
-  openclaw onboard < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
+  openclaw onboard --auth-choice skip < /dev/tty || warn "Interactive onboard exited with an error. You can re-run it later with: openclaw onboard"
   printf '\n'
 
   print_summary
