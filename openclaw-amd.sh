@@ -614,17 +614,11 @@ entry['maxTokens'] = model_max_tokens
 # --- Embeddings via LM Studio's nomic-embed (OpenAI-compatible /v1/embeddings) ---
 ms = defaults.setdefault('memorySearch', {})
 ms['enabled'] = True
-ms['provider'] = 'ollama'
+ms['provider'] = 'openai'
 ms['model'] = 'text-embedding-nomic-embed-text-v1.5'
-ms.setdefault('ollama', {})
-ms['ollama']['baseUrl'] = lmstudio_base_url
-ms.setdefault('query', {})
-ms['query']['maxResults'] = 30
-ms['query']['minScore'] = 0.15
-ms['query'].setdefault('hybrid', {})
-ms['query']['hybrid']['enabled'] = True
-ms['query']['hybrid']['vectorWeight'] = 0.7
-ms['query']['hybrid']['textWeight'] = 0.3
+remote = ms.setdefault('remote', {})
+remote['baseUrl'] = lmstudio_base_url + '/v1'
+remote['apiKey'] = 'lm-studio'
 
 # --- Browser profile: connect to Chrome via CDP on port 9222 ---
 browser = cfg.setdefault('browser', {})
