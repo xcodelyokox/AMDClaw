@@ -658,6 +658,7 @@ browser = cfg.setdefault('browser', {})
 profiles = browser.setdefault('profiles', {})
 chrome_profile = profiles.setdefault('default', {})
 chrome_profile['cdpUrl'] = 'http://127.0.0.1:9222'
+chrome_profile.setdefault('color', 'blue')
 
 config_path.write_text(json.dumps(cfg, indent=2, sort_keys=False) + "\n", encoding='utf-8')
 PY
