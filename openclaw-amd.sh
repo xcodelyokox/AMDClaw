@@ -2,10 +2,11 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="openclaw-amd"
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="0.5.0"
 
 OPENCLAW_CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"
-OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-minimax-m2.5:cloud}"
+LMSTUDIO_BASE_URL="${LMSTUDIO_BASE_URL:-}"
+OPENCLAW_AMD_MODEL_ID="${OPENCLAW_AMD_MODEL_ID:-}"
 OPENCLAW_AMD_CONTEXT_TOKENS="${OPENCLAW_AMD_CONTEXT_TOKENS:-190000}"
 OPENCLAW_AMD_MODEL_MAX_TOKENS="${OPENCLAW_AMD_MODEL_MAX_TOKENS:-64000}"
 OPENCLAW_AMD_MAX_AGENTS="${OPENCLAW_AMD_MAX_AGENTS:-2}"
@@ -14,16 +15,9 @@ OPENCLAW_AMD_GATEWAY_PORT="${OPENCLAW_AMD_GATEWAY_PORT:-18789}"
 OPENCLAW_AMD_GATEWAY_BIND="${OPENCLAW_AMD_GATEWAY_BIND:-loopback}"
 OPENCLAW_AMD_SKIP_TUNING="${OPENCLAW_AMD_SKIP_TUNING:-0}"
 
-# Ollama cloud settings
-OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
-OLLAMA_CLOUD_BASE_URL="https://ollama.com/v1"
-OLLAMA_LOCAL_BASE_URL="http://127.0.0.1:11434/v1"
-OLLAMA_BIN=""
-
 SYSTEMD_READY=0
 DAEMON_INSTALLED=0
 RAN_ONBOARD=0
-BREW_BIN=""
 
 print_banner() {
   printf '\033[1;31m░████░█░░░░░█████░█░░░█░███░░████░░████░░▀█▀\033[0m\n'
@@ -31,7 +25,7 @@ print_banner() {
   printf '\033[1;31m█░░░░░█░░░░░█████░█░█░█░█░░█░████░░█░░░█░░█░\033[0m\n'
   printf '\033[1;31m█░░░░░█░░░░░█░░░█░█░█░█░█░░█░█░░█░░█░░░█░░█░\033[0m\n'
   printf '\033[1;31m░████░█████░█░░░█░░█░█░░███░░████░░░███░░░█░\033[0m\n'
-  printf '\033[1;33m  🦞  AMD Quick Start (Ollama + MiniMax M2.5)  🦞\033[0m\n'
+  printf '\033[1;33m  🦞  AMD Quick Start (LM Studio + OpenClaw)  🦞\033[0m\n'
   printf '\n'
 }
 
@@ -93,47 +87,6 @@ prepare_npm_global_prefix() {
   hash -r 2>/dev/null || true
 }
 
-persist_brew_shellenv() {
-  [[ -n "$BREW_BIN" ]] || return 0
-  local bash_line='eval "$('"$BREW_BIN"' shellenv bash)"'
-  append_line_if_missing "$HOME/.profile" "$bash_line"
-  append_line_if_missing "$HOME/.bashrc" "$bash_line"
-  if [[ -f "$HOME/.zshrc" ]]; then
-    local zsh_line='eval "$('"$BREW_BIN"' shellenv)"'
-    append_line_if_missing "$HOME/.zshrc" "$zsh_line"
-  fi
-  eval "$("$BREW_BIN" shellenv bash)"
-  hash -r 2>/dev/null || true
-}
-
-install_homebrew_if_missing() {
-  if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
-    BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
-    persist_brew_shellenv
-    info "Homebrew already installed"
-    return 0
-  fi
-
-  if have brew; then
-    BREW_BIN="$(command -v brew)"
-    persist_brew_shellenv
-    info "Homebrew already installed"
-    return 0
-  fi
-
-  info "Installing Homebrew"
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-  if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
-    BREW_BIN="/home/linuxbrew/.linuxbrew/bin/brew"
-  elif have brew; then
-    BREW_BIN="$(command -v brew)"
-  fi
-
-  [[ -n "$BREW_BIN" ]] || die "Homebrew install finished, but 'brew' was not found."
-  persist_brew_shellenv
-}
-
 apt_install_if_missing() {
   have apt-get || die "This script currently targets Ubuntu/Debian/WSL environments with apt-get."
   local missing=()
@@ -146,167 +99,6 @@ apt_install_if_missing() {
     run_root apt-get update
     DEBIAN_FRONTEND=noninteractive run_root apt-get install -y "${missing[@]}"
   fi
-}
-
-# ---------------------------------------------------------------------------
-# Ollama installation
-# ---------------------------------------------------------------------------
-install_ollama_if_missing() {
-  refresh_ollama_path
-
-  if [[ -n "$OLLAMA_BIN" ]]; then
-    info "Ollama already installed at ${OLLAMA_BIN}"
-    return 0
-  fi
-
-  info "Installing Ollama"
-  apt_install_if_missing zstd
-  curl -fsSL https://ollama.com/install.sh | sh
-
-  refresh_ollama_path
-  [[ -n "$OLLAMA_BIN" ]] || die "Ollama installed, but 'ollama' was not found on PATH. Open a new shell and rerun."
-}
-
-refresh_ollama_path() {
-  export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
-  hash -r 2>/dev/null || true
-  if have ollama; then
-    OLLAMA_BIN="$(command -v ollama)"
-  fi
-}
-
-persist_ollama_path() {
-  local path_line='export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"'
-  append_line_if_missing "$HOME/.profile" "$path_line"
-  append_line_if_missing "$HOME/.bashrc"  "$path_line"
-  if [[ -f "$HOME/.zshrc" ]]; then
-    append_line_if_missing "$HOME/.zshrc" "$path_line"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Ensure Ollama API key is set for cloud models.
-# Prompts the user if not found in environment.
-# ---------------------------------------------------------------------------
-require_ollama_api_key() {
-  if [[ -n "$OLLAMA_API_KEY" ]]; then
-    info "OLLAMA_API_KEY is set"
-    return 0
-  fi
-
-  # Check if it was previously persisted in shell profiles
-  local sourced_key
-  sourced_key="$(grep -hE '^export OLLAMA_API_KEY=' \
-    "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null \
-    | head -1 | sed "s/^export OLLAMA_API_KEY=//;s/['\"]//g" || true)"
-  if [[ -n "$sourced_key" ]]; then
-    export OLLAMA_API_KEY="$sourced_key"
-    info "OLLAMA_API_KEY loaded from shell profile"
-    return 0
-  fi
-
-  warn "OLLAMA_API_KEY is not set. A free API key is required for cloud models."
-  warn "Get yours at: https://ollama.com/settings"
-  printf '\n'
-  read -r -p "Paste your Ollama API key and press Enter: " user_key
-  user_key="${user_key// /}"
-  [[ -n "$user_key" ]] || die "No API key provided. Re-run with OLLAMA_API_KEY=<key> to skip this prompt."
-  export OLLAMA_API_KEY="$user_key"
-
-  # Persist it so future shells and re-runs don't need to prompt again
-  local export_line="export OLLAMA_API_KEY='${user_key}'"
-  append_line_if_missing "$HOME/.profile" "$export_line"
-  append_line_if_missing "$HOME/.bashrc"  "$export_line"
-  if [[ -f "$HOME/.zshrc" ]]; then
-    append_line_if_missing "$HOME/.zshrc" "$export_line"
-  fi
-  info "OLLAMA_API_KEY saved to shell profiles"
-}
-
-# ---------------------------------------------------------------------------
-# Determine whether to use the Ollama cloud API or local server.
-# Cloud is used when the model tag contains ":cloud".
-# ---------------------------------------------------------------------------
-is_cloud_model() {
-  [[ "$OPENCLAW_AMD_MODEL_ID" == *":cloud" ]]
-}
-
-get_ollama_base_url() {
-  if is_cloud_model; then
-    printf '%s\n' "$OLLAMA_CLOUD_BASE_URL"
-  else
-    printf '%s\n' "$OLLAMA_LOCAL_BASE_URL"
-  fi
-}
-
-get_ollama_api_key_for_provider() {
-  if is_cloud_model; then
-    printf '%s\n' "$OLLAMA_API_KEY"
-  else
-    # Local Ollama doesn't require a real key
-    printf 'ollama\n'
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Start local Ollama server (only needed for non-cloud models).
-# ---------------------------------------------------------------------------
-start_ollama_server_if_local() {
-  is_cloud_model && return 0
-
-  if curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
-    info "Ollama local server already running"
-    return 0
-  fi
-
-  info "Starting Ollama local server"
-  nohup ollama serve >/tmp/ollama-serve.log 2>&1 &
-  disown
-
-  local attempts=0
-  while (( attempts < 20 )); do
-    if curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-    (( attempts++ )) || true
-  done
-  curl -fsS --max-time 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1 \
-    || die "Ollama local server did not become reachable after 20 seconds."
-  info "Ollama local server is up"
-}
-
-# ---------------------------------------------------------------------------
-# Verify the cloud endpoint is reachable and the model is accessible.
-# ---------------------------------------------------------------------------
-verify_ollama_cloud_model() {
-  is_cloud_model || return 0
-
-  info "Verifying access to ${OPENCLAW_AMD_MODEL_ID} on Ollama cloud"
-  local model_name="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
-
-  local response
-  response="$(curl -fsS --max-time 10 \
-    -H "Authorization: Bearer ${OLLAMA_API_KEY}" \
-    "${OLLAMA_CLOUD_BASE_URL}/models" 2>/dev/null || true)"
-
-  if [[ -z "$response" ]]; then
-    warn "Could not reach Ollama cloud API at ${OLLAMA_CLOUD_BASE_URL}. Check your internet connection."
-    return 1
-  fi
-
-  if printf '%s' "$response" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-models = [m.get('id','') for m in data.get('data',[])]
-sys.exit(0 if any('$model_name' in m for m in models) else 1)
-" 2>/dev/null; then
-    info "Model ${OPENCLAW_AMD_MODEL_ID} is available on Ollama cloud"
-    return 0
-  fi
-
-  warn "Model ${model_name} was not listed. It may still be accessible — continuing."
-  return 0
 }
 
 maybe_enable_wsl_systemd() {
@@ -352,34 +144,141 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# Google Chrome installation
-# Required so that `openclaw dashboard` can open a browser tab from WSL2.
+# LM Studio detection — resolve Windows host IP from inside WSL2
 # ---------------------------------------------------------------------------
-install_chrome_if_missing() {
-  if have google-chrome-stable || have google-chrome || have chromium-browser || have chromium; then
-    info "Chrome/Chromium already installed — skipping"
+detect_host_ip() {
+  local ip=""
+
+  # Method 1: /etc/resolv.conf nameserver (most reliable for WSL2)
+  if [[ -f /etc/resolv.conf ]]; then
+    ip="$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}' || true)"
+  fi
+
+  # Method 2: default gateway
+  if [[ -z "$ip" ]]; then
+    ip="$(ip route show default 2>/dev/null | awk '{print $3}' | head -1 || true)"
+  fi
+
+  # Validate IPv4
+  if [[ -z "$ip" ]] || ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "Could not determine Windows host IP from WSL2. Set LMSTUDIO_BASE_URL manually (e.g. LMSTUDIO_BASE_URL=http://192.168.1.100:1234/v1)."
+  fi
+
+  printf '%s' "$ip"
+}
+
+resolve_lmstudio_url() {
+  # Already set via environment (e.g. forwarded from PowerShell)
+  if [[ -n "$LMSTUDIO_BASE_URL" ]]; then
+    info "LM Studio base URL from environment: $LMSTUDIO_BASE_URL"
     return 0
   fi
 
-  info "Installing Google Chrome"
-  apt_install_if_missing wget gnupg2
+  # Check mirrored networking first (newer Windows 11 builds)
+  if curl -fsS --max-time 2 "http://127.0.0.1:1234/v1/models" >/dev/null 2>&1; then
+    LMSTUDIO_BASE_URL="http://127.0.0.1:1234/v1"
+    info "LM Studio reachable on localhost (mirrored networking): $LMSTUDIO_BASE_URL"
+    return 0
+  fi
 
-  wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
-    | run_root gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-
-  printf 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' \
-    | run_root tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
-
-  run_root apt-get update
-  DEBIAN_FRONTEND=noninteractive run_root apt-get install -y google-chrome-stable
-
-  have google-chrome-stable || warn "Chrome install finished but 'google-chrome-stable' not found on PATH."
-
-  apt_install_if_missing wslu
-
-  info "Google Chrome installed"
+  local host_ip
+  host_ip="$(detect_host_ip)"
+  LMSTUDIO_BASE_URL="http://${host_ip}:1234/v1"
+  info "Auto-detected LM Studio URL: $LMSTUDIO_BASE_URL"
 }
 
+wait_for_lmstudio() {
+  local url="${LMSTUDIO_BASE_URL}/models"
+  local attempts=0
+  local max_attempts=10
+
+  info "Checking LM Studio API at ${url}"
+  while (( attempts < max_attempts )); do
+    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+      info "LM Studio API is reachable"
+      return 0
+    fi
+    (( attempts++ )) || true
+    if (( attempts == 1 )); then
+      warn "LM Studio not reachable yet."
+      warn "Ensure LM Studio is running on Windows with a model loaded."
+      warn "Ensure Windows Firewall allows inbound connections on port 1234."
+    fi
+    sleep 2
+  done
+
+  die "LM Studio API at ${url} is not reachable after ${max_attempts} attempts. Start LM Studio, load a model, check firewall, and rerun."
+}
+
+# ---------------------------------------------------------------------------
+# Dynamic model selection from LM Studio
+# ---------------------------------------------------------------------------
+select_lmstudio_model() {
+  # If model already set by env var, skip selection
+  if [[ -n "$OPENCLAW_AMD_MODEL_ID" ]]; then
+    info "Using model from environment: $OPENCLAW_AMD_MODEL_ID"
+    return 0
+  fi
+
+  local models_url="${LMSTUDIO_BASE_URL}/models"
+  local response
+  response="$(curl -fsS --max-time 5 "$models_url")" \
+    || die "Failed to query models from LM Studio at ${models_url}"
+
+  # Parse model IDs into a newline-separated list
+  local model_list
+  model_list="$(printf '%s' "$response" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+models = data.get('data', [])
+if not models:
+    sys.exit(1)
+for m in models:
+    print(m['id'])
+" 2>/dev/null)" || die "No models loaded in LM Studio. Load a model in LM Studio and rerun."
+
+  # Read into array
+  local -a models=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && models+=("$line")
+  done <<< "$model_list"
+
+  if (( ${#models[@]} == 0 )); then
+    die "No models found in LM Studio. Load a model and rerun."
+  fi
+
+  if (( ${#models[@]} == 1 )); then
+    OPENCLAW_AMD_MODEL_ID="${models[0]}"
+    info "Only one model loaded: ${OPENCLAW_AMD_MODEL_ID}"
+    return 0
+  fi
+
+  # Multiple models — present a menu
+  printf '\n'
+  info "Multiple models detected in LM Studio:"
+  printf '\n'
+  local i
+  for i in "${!models[@]}"; do
+    printf '  \033[1;36m%d\033[0m. %s\n' "$(( i + 1 ))" "${models[$i]}"
+  done
+  printf '\n'
+
+  local choice
+  while true; do
+    read -r -p "Select a model [1-${#models[@]}]: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#models[@]} )); then
+      OPENCLAW_AMD_MODEL_ID="${models[$(( choice - 1 ))]}"
+      break
+    fi
+    warn "Invalid selection. Enter a number between 1 and ${#models[@]}."
+  done
+
+  info "Selected model: ${OPENCLAW_AMD_MODEL_ID}"
+}
+
+# ---------------------------------------------------------------------------
+# OpenClaw install
+# ---------------------------------------------------------------------------
 install_or_update_openclaw() {
   prepare_npm_global_prefix
   refresh_openclaw_path
@@ -421,15 +320,12 @@ backup_openclaw_config() {
 }
 
 # ---------------------------------------------------------------------------
-# Configure OpenClaw against Ollama (cloud or local) non-interactively.
+# Configure OpenClaw against LM Studio non-interactively.
 # ---------------------------------------------------------------------------
 run_noninteractive_onboard() {
   local base_url="$1"
-  local api_key="$2"
-  local provider_id="ollama"
-
-  # Strip the :cloud suffix for the model ID passed to OpenClaw
-  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
+  local provider_id="lmstudio"
+  local api_key="lm-studio"
 
   local cmd=(
     openclaw onboard
@@ -437,7 +333,7 @@ run_noninteractive_onboard() {
     --mode local
     --auth-choice custom-api-key
     --custom-base-url "$base_url"
-    --custom-model-id "$model_id"
+    --custom-model-id "$OPENCLAW_AMD_MODEL_ID"
     --custom-provider-id "$provider_id"
     --custom-compatibility "openai"
     --custom-api-key "$api_key"
@@ -452,7 +348,7 @@ run_noninteractive_onboard() {
     cmd+=(--install-daemon --daemon-runtime node)
   fi
 
-  info "Configuring OpenClaw against Ollama (${base_url})"
+  info "Configuring OpenClaw against LM Studio (${base_url})"
   if "${cmd[@]}"; then
     DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
     RAN_ONBOARD=1
@@ -467,7 +363,7 @@ run_noninteractive_onboard() {
       --mode local
       --auth-choice custom-api-key
       --custom-base-url "$base_url"
-      --custom-model-id "$model_id"
+      --custom-model-id "$OPENCLAW_AMD_MODEL_ID"
       --custom-provider-id "$provider_id"
       --custom-compatibility "openai"
       --custom-api-key "$api_key"
@@ -489,12 +385,11 @@ run_noninteractive_onboard() {
 }
 
 # ---------------------------------------------------------------------------
-# Check if OpenClaw is already configured for the current Ollama provider/model.
+# Check if OpenClaw is already configured for LM Studio provider/model.
 # ---------------------------------------------------------------------------
 is_openclaw_configured() {
   [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 1
-  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
-  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "ollama" "$model_id"
+  python3 - <<'PY' "$OPENCLAW_CONFIG_FILE" "lmstudio" "$OPENCLAW_AMD_MODEL_ID"
 import json, sys
 from pathlib import Path
 try:
@@ -523,13 +418,12 @@ auto_tune_config() {
   [[ "$OPENCLAW_AMD_SKIP_TUNING" == "1" ]] && return 0
   [[ -f "$OPENCLAW_CONFIG_FILE" ]] || return 0
 
-  local model_id="${OPENCLAW_AMD_MODEL_ID%%:cloud}"
   local context_tokens="$OPENCLAW_AMD_CONTEXT_TOKENS"
 
   python3 - <<'PY' \
     "$OPENCLAW_CONFIG_FILE" \
-    "ollama" \
-    "$model_id" \
+    "lmstudio" \
+    "$OPENCLAW_AMD_MODEL_ID" \
     "$context_tokens" \
     "$OPENCLAW_AMD_MODEL_MAX_TOKENS" \
     "$OPENCLAW_AMD_MAX_AGENTS" \
@@ -562,7 +456,7 @@ else:
 
 default_models = defaults.setdefault('models', {})
 default_models.setdefault(model_ref, {})
-default_models[model_ref].setdefault('alias', 'ollama-cloud')
+default_models[model_ref].setdefault('alias', 'lmstudio-local')
 
 defaults['contextTokens'] = context_tokens
 defaults['maxConcurrent'] = max_agents
@@ -595,26 +489,17 @@ PY
 print_summary() {
   printf '\n'
   info "${SCRIPT_NAME} ${SCRIPT_VERSION} complete"
-  if is_cloud_model; then
-    printf '  Ollama endpoint   : %s\n' "$OLLAMA_CLOUD_BASE_URL"
-  else
-    printf '  Ollama endpoint   : %s\n' "$OLLAMA_LOCAL_BASE_URL"
-  fi
-  printf '  Model             : %s\n' "$OPENCLAW_AMD_MODEL_ID"
-  printf '  Context tokens    : %s\n' "$OPENCLAW_AMD_CONTEXT_TOKENS"
-  printf '  Max tokens        : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
-  printf '  Agent concurrency : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
-  printf '  Subagent conc.    : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
-  printf '\n'
-  printf 'Ollama quick-reference:\n'
-  printf '  ollama list                         # list local models\n'
-  printf '  ollama run minimax-m2.5:cloud       # chat with MiniMax M2.5 cloud\n'
-  printf '  ollama launch openclaw --model minimax-m2.5:cloud  # relaunch OpenClaw\n'
+  printf '  LM Studio endpoint : %s\n' "$LMSTUDIO_BASE_URL"
+  printf '  Model              : %s\n' "$OPENCLAW_AMD_MODEL_ID"
+  printf '  Context tokens     : %s\n' "$OPENCLAW_AMD_CONTEXT_TOKENS"
+  printf '  Max tokens         : %s\n' "$OPENCLAW_AMD_MODEL_MAX_TOKENS"
+  printf '  Agent concurrency  : %s\n' "$OPENCLAW_AMD_MAX_AGENTS"
+  printf '  Subagent conc.     : %s\n' "$OPENCLAW_AMD_MAX_SUBAGENTS"
   printf '\n'
 }
 
 # ---------------------------------------------------------------------------
-# Start the OpenClaw gateway, open the dashboard in Chrome, then hatch TUI.
+# Start the OpenClaw gateway, open the dashboard, then launch TUI.
 # ---------------------------------------------------------------------------
 launch_openclaw() {
   print_summary
@@ -629,84 +514,88 @@ launch_openclaw() {
       --bind "$OPENCLAW_AMD_GATEWAY_BIND" \
       >/tmp/openclaw-gateway.log 2>&1 &
     disown
-
-    local attempts=0
-    while (( attempts < 15 )); do
-      if curl -fsS --max-time 1 \
-           "http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-      (( attempts++ )) || true
-    done
   fi
 
+  # Wait for gateway to be fully ready
+  local gw_ready=0
+  local gw_attempts=0
+  while (( gw_attempts < 20 )); do
+    if curl -fsS --max-time 1 \
+         "http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/" >/dev/null 2>&1; then
+      gw_ready=1
+      break
+    fi
+    sleep 0.5
+    (( gw_attempts++ )) || true
+  done
+  if (( ! gw_ready )); then
+    warn "Gateway may not be fully ready; TUI might take a moment to connect."
+  fi
+
+  # Open dashboard in Windows default browser (no Chrome install needed)
   info "Opening OpenClaw dashboard"
   local dashboard_url
   dashboard_url="$(openclaw dashboard --no-open 2>/dev/null | grep -oP 'https?://\S+' | head -1 || true)"
-  if [[ -n "$dashboard_url" ]]; then
-    info "Dashboard: ${dashboard_url}"
-    if have xdg-open; then
-      xdg-open "$dashboard_url" >/dev/null 2>&1 &
-      disown
-    elif have wslview; then
-      wslview "$dashboard_url" >/dev/null 2>&1 &
-      disown
-    fi
-  else
-    info "Dashboard: http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
+  if [[ -z "$dashboard_url" ]]; then
+    dashboard_url="http://127.0.0.1:${OPENCLAW_AMD_GATEWAY_PORT}/"
+  fi
+  info "Dashboard: ${dashboard_url}"
+
+  if is_wsl; then
+    cmd.exe /c start "" "$dashboard_url" 2>/dev/null &
+    disown 2>/dev/null || true
+  elif have xdg-open; then
+    xdg-open "$dashboard_url" >/dev/null 2>&1 &
+    disown
   fi
 
-  info "Hatching in TUI — press Q to quit the TUI (gateway keeps running)"
+  # Let the gateway finish any post-bind initialization
+  sleep 1
+
+  # Flush any buffered stdin from prior script interaction
+  while read -t 0.1 -n 1 -r 2>/dev/null; do :; done
+
+  # Full terminal reset before launching TUI
+  reset 2>/dev/null || stty sane 2>/dev/null || true
+
+  info "Launching TUI — press Q to quit (gateway keeps running)"
   printf '\n'
-  stty sane 2>/dev/null || true
-  exec openclaw tui
+  openclaw tui
+  exit $?
 }
 
 main() {
   print_banner
   require_linux
-  apt_install_if_missing ca-certificates curl git python3 build-essential wget gnupg2
+  apt_install_if_missing ca-certificates curl git python3 build-essential
   prepare_npm_global_prefix
   maybe_enable_wsl_systemd
 
-  install_homebrew_if_missing
-  install_chrome_if_missing
+  # LM Studio detection
+  resolve_lmstudio_url
+  wait_for_lmstudio
+  select_lmstudio_model
+
+  # OpenClaw install
   install_or_update_openclaw
   prepare_npm_global_prefix
   require_openclaw
 
-  # Install Ollama
-  install_ollama_if_missing
-  persist_ollama_path
-
-  # Require API key for cloud models
-  if is_cloud_model; then
-    require_ollama_api_key
-    verify_ollama_cloud_model
-  else
-    start_ollama_server_if_local
-  fi
-
-  local base_url
-  base_url="$(get_ollama_base_url)"
-  local api_key
-  api_key="$(get_ollama_api_key_for_provider)"
-
+  # Onboard or skip if already configured
   local configured=0
   if is_openclaw_configured; then
-    info "OpenClaw already configured for ollama/${OPENCLAW_AMD_MODEL_ID%%:cloud} — skipping onboard"
+    info "OpenClaw already configured for lmstudio/${OPENCLAW_AMD_MODEL_ID} — skipping onboard"
     configured=1
     RAN_ONBOARD=1
     DAEMON_INSTALLED=$(( SYSTEMD_READY ? 1 : 0 ))
   else
     backup_openclaw_config "$OPENCLAW_CONFIG_FILE"
-    if run_noninteractive_onboard "$base_url" "$api_key"; then
+    if run_noninteractive_onboard "$LMSTUDIO_BASE_URL"; then
       configured=1
     else
       warn "Non-interactive onboard failed."
     fi
-    (( configured == 1 )) || die "OpenClaw onboarding against Ollama failed. Check the output above."
+    (( configured == 1 )) || die "OpenClaw onboarding against LM Studio failed. Check the output above."
   fi
 
   auto_tune_config
